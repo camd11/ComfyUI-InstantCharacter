@@ -54,6 +54,7 @@ def retrieve_timesteps(scheduler, num_inference_steps, device, sigmas=None, mu=0
 class InstantCharacterFluxPipeline(nn.Module): # Changed base class
     def __init__(self,
                  flux_unet_model_object,      # ComfyUI MODEL object
+                 vae_module,                  # VAE nn.Module
                  siglip_vision_model_object,  # ComfyUI CLIP_VISION object for SigLIP
                  dinov2_vision_model_object,  # ComfyUI CLIP_VISION object for DINOv2
                  ipadapter_model_data_dict,   # Dict of IPAdapter weights
@@ -68,8 +69,8 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
 
         # Assign FLUX components from flux_unet_model_object
         # These attributes are based on typical ComfyUI MODEL object structure and FLUX needs
-        self.transformer = flux_unet_model_object.diffusion_model
-        self.vae = flux_unet_model_object.first_stage_model
+        self.transformer = flux_unet_model_object.model
+        self.vae = vae_module
         
         # Text encoders, tokenizers, and scheduler are expected to be part of flux_unet_model_object
         # or need to be passed separately if not.

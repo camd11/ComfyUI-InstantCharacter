@@ -22,16 +22,15 @@ class InstantCharacterLoader:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "flux_unet_model": ("MODEL", {}),        # From GGUF Unet Loader or standard UNet Loader
-                "siglip_vision_model": ("CLIP_VISION", {}), # From CLIP Vision Loader (for SigLIP)
-                "dinov2_vision_model": ("CLIP_VISION", {}), # From CLIP Vision Loader (for DINOv2)
-                "ipadapter_model_data": ("IPADAPTER", {}), # From IPAdapter Model Loader
+                "flux_unet_model": ("MODEL", {}),
+                "flux_text_encoder_one": ("CLIP", {}),
+                "flux_text_encoder_two": ("CLIP", {}),
+                "flux_vae": ("VAE", {}),
+                "siglip_vision_model": ("CLIP_VISION", {}),
+                "dinov2_vision_model": ("CLIP_VISION", {}),
+                "ipadapter_model_data": ("IPADAPTER", {}),
                 "cpu_offload": ("BOOLEAN", {"default": False}),
             },
-            # Optional inputs if not bundled in `flux_unet_model` (MODEL type):
-            # "flux_vae": ("VAE", {}),
-            # "flux_text_encoder_one": ("CLIP", {}), # Or appropriate type for FLUX text encoder 1
-            # "flux_text_encoder_two": ("CLIP", {}), # Or appropriate type for FLUX text encoder 2
         }
 
     RETURN_TYPES = ("INSTANTCHAR_PIPE",)
@@ -41,19 +40,16 @@ class InstantCharacterLoader:
 
     def load_pipe_from_models(self,
                               flux_unet_model,
+                              flux_text_encoder_one,
+                              flux_text_encoder_two,
+                              flux_vae,
                               siglip_vision_model,
                               dinov2_vision_model,
                               ipadapter_model_data,
                               cpu_offload,
-                              # flux_vae=None, flux_text_encoder_one=None, flux_text_encoder_two=None # If passed separately
                              ):
 
-        # Determine device and dtype, e.g., from an input model or ComfyUI's model_management
-        # device = comfy.model_management.get_torch_device() # ComfyUI preferred way
-        # dtype = comfy.model_management.VAE_DTYPE # Or infer, e.g. flux_unet_model.model.dtype
-        # For now, pipeline will infer from flux_unet_model.model.device and use its own default dtype or infer.
-        
-        # Validate ipadapter_model_data structure
+        # Validate ipadapter_model_data structure (remains important)
         if not isinstance(ipadapter_model_data, dict) or \
            "ip_adapter" not in ipadapter_model_data or \
            "image_proj" not in ipadapter_model_data:
@@ -62,15 +58,26 @@ class InstantCharacterLoader:
                 "with 'ip_adapter' and 'image_proj' keys containing state_dicts."
             )
 
-        # Instantiate the refactored pipeline
-        # The pipeline's __init__ will handle device placement of its own new modules
-        # based on the device of flux_unet_model.
+        # Extract underlying nn.Module components
+        actual_unet = flux_unet_model.model
+        actual_text_encoder_one = flux_text_encoder_one.cond_stage_model
+        actual_text_encoder_two = flux_text_encoder_two.cond_stage_model
+        actual_vae = flux_vae.first_stage_model
+        # siglip_vision_model and dinov2_vision_model are CLIP_VISION types,
+        # which are typically the nn.Module itself.
+        # ipadapter_model_data is a dict containing state_dicts for IPAdapter.
+
+        # Instantiate the pipeline with raw nn.Module components
+        # The pipeline's __init__ is expected to handle device placement of its
+        # internal components, potentially based on the device of the input unet_model.
         pipe = InstantCharacterFluxPipeline(
             flux_unet_model_object=flux_unet_model,
+            vae_module=actual_vae, # Added VAE nn.Module
             siglip_vision_model_object=siglip_vision_model,
             dinov2_vision_model_object=dinov2_vision_model,
-            ipadapter_model_data_dict=ipadapter_model_data,
-            # dtype can be passed if needed, otherwise pipeline uses its default
+            ipadapter_model_data_dict=ipadapter_model_data
+            # The pipeline's __init__ will handle extracting components from flux_unet_model_object
+            # and infer device/dtype.
         )
 
         # CPU Offload:
