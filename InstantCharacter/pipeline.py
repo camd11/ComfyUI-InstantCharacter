@@ -14,7 +14,6 @@ from typing import Union, List, Optional, Dict, Any, Callable # Added for __call
 from diffusers.pipelines.flux.pipeline_output import FluxPipelineOutput # Keep if __call__ returns this
 from diffusers.utils import replace_example_docstring # Keep if EXAMPLE_DOC_STRING is used
 from diffusers.utils.torch_utils import randn_tensor # For latent generation if not from model object
-from diffusers.pipelines.pipeline_utils import PipelineImageInput # For type hinting if __call__ uses it
 
 from .models.attn_processor import FluxIPAttnProcessor
 from .models.resampler import CrossLayerCrossScaleProjector
@@ -425,7 +424,7 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
 
 
     @torch.no_grad()
-    @replace_example_docstring(EXAMPLE_DOC_STRING) # This decorator might need removal if base class changes
+    # @replace_example_docstring(EXAMPLE_DOC_STRING) # This decorator might need removal if base class changes
     def __call__(
         self,
         prompt: Union[str, List[str]] = None,
