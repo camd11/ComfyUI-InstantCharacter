@@ -5,6 +5,8 @@ import folder_paths
 from PIL import Image
 import numpy as np
 import copy # For deep copying the model
+from einops import rearrange
+from transformers import SiglipImageProcessor, AutoImageProcessor # Needed for image processing
 
 # Add the parent directory to the Python path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -92,153 +94,209 @@ class InstantCharacterApply:
             print("No projector module available. Image conditioning will be skipped.")
 
 
-        # 4. Encode subject image if provided
-        image_cond = None
-        if subject_image is not None and proj_module is not None: # Ensure projector is available
-            print("Encoding subject image...")
-            if not hasattr(image_encoder_1, "encode_image") or not hasattr(image_encoder_2, "encode_image"):
-                print("Warning: Provided image encoders lack 'encode_image' method. Cannot encode subject image.")
-            else:
-                # Ensure image is 4D tensor [B, C, H, W] on correct device/dtype
-                img = subject_image
-                if img.dim() == 3:
-                    img = img.unsqueeze(0)
-                # Move image tensor to the main model's device
-                img = img.to(device=device, dtype=torch.float32) # Encoders might expect float32
-
-                # Encode using both encoders
-                # Ensure encoders are on the main model's device
-                if hasattr(image_encoder_1, "model") and isinstance(image_encoder_1.model, torch.nn.Module):
-                    image_encoder_1.model.to(device)
-                elif isinstance(image_encoder_1, torch.nn.Module): # If the object itself is the module
-                    image_encoder_1.to(device)
-                else:
-                    print("Warning: Could not move image_encoder_1 to device, .model attribute not found or not a module.")
-
-                if hasattr(image_encoder_2, "model") and isinstance(image_encoder_2.model, torch.nn.Module):
-                    image_encoder_2.model.to(device)
-                elif isinstance(image_encoder_2, torch.nn.Module): # If the object itself is the module
-                    image_encoder_2.to(device)
-                else:
-                    print("Warning: Could not move image_encoder_2 to device, .model attribute not found or not a module.")
-
-                with torch.no_grad():
-                    emb1 = image_encoder_1.encode_image(img)
-                    emb2 = image_encoder_2.encode_image(img)
-
-                if emb1 is None or emb2 is None:
-                     print("Warning: Image encoding failed for one or both encoders.")
-                else:
-                    emb1 = emb1.to(device=device, dtype=dtype) # Move embeddings to model device/dtype
-                    emb2 = emb2.to(device=device, dtype=dtype)
-
-                    # Basic CLS token removal heuristic (needs verification for specific encoders)
-                    if emb1.shape[1] > 1 and emb1.shape[1] == emb2.shape[1] + 1:
-                        emb1 = emb1[:, 1:]
-                    elif emb2.shape[1] > 1 and emb2.shape[1] == emb1.shape[1] + 1:
-                        emb2 = emb2[:, 1:]
-                    elif emb1.shape[1] != emb2.shape[1]:
-                         print(f"Warning: Encoder output token lengths differ significantly ({emb1.shape[1]} vs {emb2.shape[1]}). Check encoder compatibility.")
-                         # Attempt to proceed if shapes are plausible, otherwise skip concat
-
-                    if emb1.shape[1] == emb2.shape[1]:
-                        print(f"Concatenating encoder features: {emb1.shape} + {emb2.shape}")
-                        image_tokens = torch.cat([emb1, emb2], dim=-1) # Concat feature dim
-
-                        # Project concatenated tokens - requires timestep, use dummy 0 for patching setup
-                        # The actual timestep will be used during sampling by the patched attn processor
-                        dummy_timestep = torch.zeros(1, device=device, dtype=dtype)
-                        with torch.no_grad():
-                             # Projector might return tuple (embeds, time_embeds), take first
-                             proj_output = proj_module(image_tokens, dummy_timestep, need_temb=False)
-                             if isinstance(proj_output, tuple):
-                                 image_cond = proj_output[0]
-                             else:
-                                 image_cond = proj_output
-                        print(f"Projected image condition shape: {image_cond.shape}")
-                    else:
-                         print("Skipping feature concatenation due to mismatched token lengths.")
-
-        # 5. Set up custom attention processors
-        if attn_weights is not None and hasattr(model, "set_attn_processor"):
-            print("Setting custom attention processors...")
-            attn_procs = {}
-            ip_hidden_states_dim = proj_module.output_dim if proj_module else 4096 # Fallback dim
-
-            # Iterate through existing processors to find target modules
-            for name in model.attn_processors.keys():
-                # Dynamically find the attention module corresponding to the processor name
-                module_path = name.split('.')
-                current_module = model
+        # 4. Encode subject image using multi-resolution approach if provided
+        image_embeds_dict = None # Initialize
+        if subject_image is not None and proj_module is not None:
+            print("Encoding subject image using multi-resolution approach...")
+            # --- Helper functions to replicate original pipeline's encoding ---
+            @torch.inference_mode()
+            def _encode_siglip_helper(encoder_model, image_tensor, device, dtype):
+                encoder_model.to(device, dtype=dtype)
+                image_tensor = image_tensor.to(device, dtype=dtype)
                 try:
-                    for part in module_path:
-                        if part.isdigit():
-                            current_module = current_module[int(part)]
-                        else:
-                            current_module = getattr(current_module, part)
-                    # Infer hidden_size from the attention module's query projection
-                    if hasattr(current_module, 'to_q'):
-                         hidden_size = current_module.to_q.in_features
-                    elif hasattr(model.config, 'hidden_size'): # Fallback to model config
-                         hidden_size = model.config.hidden_size
-                    else: # Further fallback
-                         hidden_size = current_module.processor.to_q.in_features # Access original processor
-                    print(f"  - Processor '{name}': hidden_size={hidden_size}, ip_dim={ip_hidden_states_dim}")
-                    attn_procs[name] = FluxIPAttnProcessor(
+                    res = encoder_model(image_tensor, output_hidden_states=True)
+                    last_hidden = res.last_hidden_state
+                    shallow_indices = [7, 13, 26] # 0-based indices from original pipeline
+                    if res.hidden_states is None or len(res.hidden_states) <= max(shallow_indices):
+                         print("Warning: SigLIP hidden_states not available or too short for shallow features.")
+                         return last_hidden, None # Return only deep if shallow fails
+                    shallow_hidden = torch.cat([res.hidden_states[i] for i in shallow_indices], dim=1)
+                    return last_hidden, shallow_hidden
+                except Exception as e:
+                    print(f"Error during SigLIP encoding: {e}")
+                    return None, None
+
+            @torch.inference_mode()
+            def _encode_dinov2_helper(encoder_model, image_tensor, device, dtype):
+                encoder_model.to(device, dtype=dtype)
+                image_tensor = image_tensor.to(device, dtype=dtype)
+                try:
+                    res = encoder_model(image_tensor, output_hidden_states=True)
+                    last_hidden = res.last_hidden_state[:, 1:] # Remove CLS token
+                    shallow_indices = [9, 19, 29] # 0-based indices from original pipeline
+                    if res.hidden_states is None or len(res.hidden_states) <= max(shallow_indices):
+                         print("Warning: DINOv2 hidden_states not available or too short for shallow features.")
+                         return last_hidden, None # Return only deep if shallow fails
+                    shallow_hidden = torch.cat([res.hidden_states[i][:, 1:] for i in shallow_indices], dim=1) # Remove CLS
+                    return last_hidden, shallow_hidden
+                except Exception as e:
+                    print(f"Error during DINOv2 encoding: {e}")
+                    return None, None
+            # --- End Helper Functions ---
+
+            # Get underlying HF models (assuming .model attribute exists)
+            siglip_hf_model = getattr(image_encoder_1, "model", image_encoder_1)
+            dinov2_hf_model = getattr(image_encoder_2, "model", image_encoder_2)
+
+            # Instantiate image processors (temporary solution)
+            try:
+                # TODO: Ideally get processors associated with the loaded models instead of hardcoding names
+                siglip_processor = SiglipImageProcessor.from_pretrained("google/siglip-so400m-patch14-384")
+                dino_processor = AutoImageProcessor.from_pretrained("facebook/dinov2-giant")
+                dino_processor.crop_size = dict(height=384, width=384)
+                dino_processor.size = dict(shortest_edge=384)
+            except Exception as e:
+                print(f"Warning: Could not instantiate default image processors: {e}. Cannot encode image.")
+                siglip_processor = None
+                dino_processor = None
+
+            if siglip_processor and dino_processor:
+                # Convert input tensor to PIL Image
+                if subject_image.dim() == 4: img_tensor = subject_image[0]
+                else: img_tensor = subject_image
+                # Ensure tensor is on CPU for numpy conversion
+                img_pil = Image.fromarray((img_tensor.cpu().numpy() * 255).astype(np.uint8))
+                # Resize to square aspect ratio before further processing
+                img_pil = img_pil.resize((max(img_pil.size), max(img_pil.size)))
+
+                # Prepare low-res and high-res versions
+                img_pil_low_res = [img_pil.resize((384, 384))]
+                img_pil_high_res_base = img_pil.resize((768, 768))
+                img_pil_high_res_crops = [
+                    img_pil_high_res_base.crop((0, 0, 384, 384)),
+                    img_pil_high_res_base.crop((384, 0, 768, 384)),
+                    img_pil_high_res_base.crop((0, 384, 384, 768)),
+                    img_pil_high_res_base.crop((384, 384, 768, 768)),
+                ]
+                nb_split_image = len(img_pil_high_res_crops)
+
+                # Process images to tensors
+                siglip_pixels_low = siglip_processor(images=img_pil_low_res, return_tensors="pt").pixel_values
+                dino_pixels_low = dino_processor(images=img_pil_low_res, return_tensors="pt").pixel_values
+                siglip_pixels_high = siglip_processor(images=img_pil_high_res_crops, return_tensors="pt").pixel_values
+                dino_pixels_high = dino_processor(images=img_pil_high_res_crops, return_tensors="pt").pixel_values
+
+                # Encode low-res
+                siglip_deep_low, siglip_shallow_low = _encode_siglip_helper(siglip_hf_model, siglip_pixels_low, device, dtype)
+                dino_deep_low, dino_shallow_low = _encode_dinov2_helper(dinov2_hf_model, dino_pixels_low, device, dtype)
+
+                # Encode high-res crops
+                siglip_pixels_high = rearrange(siglip_pixels_high, 'n c h w -> n c h w') # Ensure 4D for batch processing
+                dino_pixels_high = rearrange(dino_pixels_high, 'n c h w -> n c h w')   # Ensure 4D for batch processing
+                siglip_deep_high_crops, _ = _encode_siglip_helper(siglip_hf_model, siglip_pixels_high, device, dtype)
+                dino_deep_high_crops, _ = _encode_dinov2_helper(dinov2_hf_model, dino_pixels_high, device, dtype)
+
+                # Combine results if all encodings succeeded
+                if all(e is not None for e in [siglip_deep_low, siglip_shallow_low, dino_deep_low, dino_shallow_low, siglip_deep_high_crops, dino_deep_high_crops]):
+                    # Ensure results are on the correct device/dtype before concatenation
+                    siglip_deep_low = siglip_deep_low.to(device=device, dtype=dtype)
+                    siglip_shallow_low = siglip_shallow_low.to(device=device, dtype=dtype)
+                    dino_deep_low = dino_deep_low.to(device=device, dtype=dtype)
+                    dino_shallow_low = dino_shallow_low.to(device=device, dtype=dtype)
+                    siglip_deep_high_crops = siglip_deep_high_crops.to(device=device, dtype=dtype)
+                    dino_deep_high_crops = dino_deep_high_crops.to(device=device, dtype=dtype)
+
+                    # Combine deep low-res
+                    image_embeds_low_res_deep = torch.cat([siglip_deep_low, dino_deep_low], dim=2)
+                    # Combine shallow low-res
+                    image_embeds_low_res_shallow = torch.cat([siglip_shallow_low, dino_shallow_low], dim=2)
+
+                    # Rearrange and combine deep high-res
+                    # Need batch dimension for rearrange: add it if missing (e.g., if batch size was 1)
+                    if siglip_deep_high_crops.dim() == 3: siglip_deep_high_crops = siglip_deep_high_crops.unsqueeze(0)
+                    if dino_deep_high_crops.dim() == 3: dino_deep_high_crops = dino_deep_high_crops.unsqueeze(0)
+                    # The rearrange logic assumes the batch dim was added *before* encoding if nb_split_image > 1
+                    # Let's adjust based on the output shape directly
+                    # Expected shape after encoding crops: (nb_split_image, seq_len, channels)
+                    # We need to reshape to (1, nb_split_image * seq_len, channels)
+                    siglip_deep_high = siglip_deep_high_crops.view(1, -1, siglip_deep_high_crops.shape[-1])
+                    dino_deep_high = dino_deep_high_crops.view(1, -1, dino_deep_high_crops.shape[-1])
+                    image_embeds_high_res_deep = torch.cat([siglip_deep_high, dino_deep_high], dim=2)
+
+                    image_embeds_dict = dict(
+                        image_embeds_low_res_shallow=image_embeds_low_res_shallow,
+                        image_embeds_low_res_deep=image_embeds_low_res_deep,
+                        image_embeds_high_res_deep=image_embeds_high_res_deep,
+                    )
+                    print("Successfully generated multi-resolution image embeddings dict.")
+                else:
+                    print("Warning: Failed to generate all required embeddings.")
+                    image_embeds_dict = None
+            else:
+                print("Warning: Cannot proceed with image encoding without processors.")
+                image_embeds_dict = None
+
+        # 5. Set up custom attention processors (FluxIPAttnProcessor) and load weights
+        if attn_weights is not None and hasattr(model, "set_attn_processor"):
+            print("Setting custom FluxIPAttnProcessors and loading weights...")
+            attn_procs = {}
+            # ip_hidden_states_dim should match the *output* of the projector
+            ip_hidden_states_dim = proj_module.output_dim if proj_module and hasattr(proj_module, 'output_dim') else 4096
+
+            # Ensure attn_weights keys don't have unexpected prefixes
+            converted_attn_weights = {}
+            for k, v in attn_weights.items():
+                new_key = k.replace("processor.", "") # Remove potential prefix
+                converted_attn_weights[new_key] = v
+
+            for name in model.attn_processors.keys():
+                current_attention_module = model
+                try:
+                    # Navigate to the actual attention module
+                    for part in name.split('.'):
+                        current_attention_module = getattr(current_attention_module, part) if not part.isdigit() else current_attention_module[int(part)]
+
+                    # Infer hidden_size
+                    hidden_size = getattr(current_attention_module, 'to_q', {}).in_features if hasattr(current_attention_module, 'to_q') else model.config.hidden_size
+
+                    # Instantiate OUR custom processor
+                    current_processor = FluxIPAttnProcessor(
                         hidden_size=hidden_size,
                         ip_hidden_states_dim=ip_hidden_states_dim
+                        # We will modify FluxIPAttnProcessor later to accept model/projector refs if needed
                     ).to(device, dtype=dtype)
+
+                    # Load weights from the converted state dict into this specific processor instance
+                    # We assume the state dict from ip_adapter.processor contains weights compatible
+                    # with FluxIPAttnProcessor's layers (e.g., to_k_ip, to_v_ip)
+                    missing, unexpected = current_processor.load_state_dict(converted_attn_weights, strict=False)
+                    if missing: print(f"Warning: Missing IP-Adapter attn weights for '{name}': {missing}")
+                    if unexpected: print(f"Warning: Unexpected IP-Adapter attn weights for '{name}': {unexpected}")
+
+                    attn_procs[name] = current_processor
                 except Exception as e:
-                    print(f"Warning: Could not get module or hidden_size for processor '{name}': {e}")
+                    print(f"Error setting up processor for '{name}': {e}")
 
-
-            # Load weights into the new processors
-            try:
-                # Convert processor dict keys if necessary (sometimes saved with 'processor.' prefix)
-                converted_attn_weights = {}
-                for k, v in attn_weights.items():
-                    # Example conversion: remove potential prefix if loader added one
-                    new_key = k.replace("processor.", "")
-                    converted_attn_weights[new_key] = v
-
-                # Create a temporary ModuleList to load state dict into processors
-                temp_module_list = torch.nn.ModuleList(attn_procs.values())
-                missing_keys, unexpected_keys = temp_module_list.load_state_dict(converted_attn_weights, strict=False)
-                if missing_keys: print(f"Warning: Missing IP-Adapter attn weights: {missing_keys}")
-                if unexpected_keys: print(f"Warning: Unexpected IP-Adapter attn weights: {unexpected_keys}")
-
-                # Set the processors on the model
+            if attn_procs:
                 model.set_attn_processor(attn_procs)
-                print("Custom attention processors set and weights loaded.")
-            except Exception as e:
-                print(f"Error loading attention processor weights: {e}")
-                # Optionally revert to original processors or return unmodified model
-                # return (base_model,)
+                print("Custom FluxIPAttnProcessors set and weights loaded.")
         elif attn_weights is None:
              print("No attention weights found in IP Adapter object. Skipping attention processor patching.")
         else:
              print("Warning: Model does not support 'set_attn_processor'. Cannot apply IP-Adapter via processors.")
 
 
-        # 6. Store conditioning info on the model patcher for the sampling process to use
-        # The custom FluxIPAttnProcessor needs access to this during its forward pass.
-        # KSampler or a custom sampler needs to be aware of this structure.
-        if image_cond is not None:
-            model_patcher.instant_character_cond = {
-                'image_embeds': image_cond,
-                'scale': subject_scale
+        # 6. Store conditioning info for the KSampler (IPAdapter+) or patched forward
+        # Store unprojected tokens and the projector module itself.
+        # Store the generated dict (or None) and other info for the attn processors
+        if subject_image is not None and image_embeds_dict is not None and proj_module is not None:
+            model_patcher._ip_kwargs = {
+                "image_embeds": image_embeds_dict, # Store the dict with multi-res embeddings
+                "projector": proj_module,
+                "scale": subject_scale,
             }
-            print(f"Stored InstantCharacter conditioning on model patcher (scale: {subject_scale}).")
+            print(f"Stored multi-res embeddings and projector in _ip_kwargs (scale: {subject_scale}).")
         else:
-            # Ensure attribute exists even if no image provided, maybe with scale 0?
-            model_patcher.instant_character_cond = {
-                 'image_embeds': None,
-                 'scale': 0.0 # Apply no effect if no image
+            # Ensure attribute exists but indicates no effect if encoding failed or no image
+            model_patcher._ip_kwargs = {
+                 "image_embeds": None,
+                 "projector": None,
+                 "scale": 0.0
             }
-            print("No subject image provided or encoding failed; setting scale to 0.")
+            print("No subject image, tokens, or projector; IP-Adapter effect will be nullified (scale 0).")
 
 
-        # 7. Return the modified model_patcher (which is a ComfyUI MODEL object)
+        # 7. Return the modified model_patcher (which is a ComfyUI MODEL object containing the patched model)
         print("InstantCharacterApply finished.")
         return (model_patcher,)
 

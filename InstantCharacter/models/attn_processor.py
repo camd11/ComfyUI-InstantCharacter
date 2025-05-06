@@ -22,20 +22,81 @@ class FluxIPAttnProcessor(nn.Module):
         self.to_k_ip = nn.Linear(ip_hidden_states_dim, hidden_size)
         self.norm_ip_k = RMSNorm(128, eps=1e-6)
         self.to_v_ip = nn.Linear(ip_hidden_states_dim, hidden_size)
+        # Store references passed during init (though not strictly needed if accessed via attn.model)
+        # self.main_transformer_model_ref = main_transformer_model_ref
+        # self.image_projector_module_ref = image_projector_module_ref
 
 
     def __call__(
         self,
-        attn,
+        attn, # The attention module this processor is attached to (e.g., FluxAttention)
         hidden_states: torch.FloatTensor,
         encoder_hidden_states: torch.FloatTensor = None,
         attention_mask: Optional[torch.FloatTensor] = None,
         image_rotary_emb: Optional[torch.Tensor] = None,
-        emb_dict={},
-        subject_emb_dict={},
-        *args,
+        # **joint_attention_kwargs might be passed here by diffusers/sampler
         **kwargs,
     ) -> torch.FloatTensor:
+        
+        # Retrieve conditioning data stored on the main model by InstantCharacterApply node
+        # Assumes the main model is accessible via attn.model (common pattern)
+        # or needs to be passed/accessed differently depending on FluxAttention structure
+        main_model = attn.model if hasattr(attn, "model") else None # Need a way to access the main model
+        ip_kwargs = getattr(main_model, "_ip_kwargs", None) if main_model else None
+
+        ip_hidden_states = None
+        scale = 0.0
+        if ip_kwargs and ip_kwargs.get("image_embeds") is not None and ip_kwargs.get("projector") is not None:
+            image_tokens = ip_kwargs["image_embeds"]
+            projector = ip_kwargs["projector"]
+            scale = ip_kwargs["scale"]
+            
+            # Get current timestep - crucial for projection
+            # How timestep is passed depends on the transformer's forward signature.
+            # Common names: 'timestep', 't', 'added_cond_kwargs' containing timestep. Check Flux transformer impl.
+            # Placeholder: Assume timestep is available in kwargs
+            timestep = kwargs.get("timestep", None)
+            if timestep is None and "added_cond_kwargs" in kwargs and isinstance(kwargs["added_cond_kwargs"], dict):
+                 timestep = kwargs["added_cond_kwargs"].get("timestep", None)
+
+            if timestep is not None and scale > 0:
+                 # Ensure projector is on correct device (might have been offloaded)
+                 projector.to(hidden_states.device, dtype=hidden_states.dtype)
+                 # Project image tokens using the current timestep
+                 with torch.no_grad():
+                     # Projector expects specific inputs: low_res_shallow, low_res_deep, high_res_deep
+                     # Retrieve the dict prepared by InstantCharacterApply node
+                     image_embeds_dict = ip_kwargs.get("image_embeds") # This should now be the dict
+                     if image_embeds_dict is None or not all(k in image_embeds_dict for k in ['image_embeds_low_res_shallow', 'image_embeds_low_res_deep', 'image_embeds_high_res_deep']):
+                          print("Warning: image_embeds_dict not found in ip_kwargs or missing required keys.")
+                          ip_hidden_states = None
+                     else:
+                          # Ensure embeddings are on the correct device/dtype before passing to projector
+                          low_res_shallow = image_embeds_dict['image_embeds_low_res_shallow'].to(hidden_states.device, dtype=hidden_states.dtype)
+                          low_res_deep = image_embeds_dict['image_embeds_low_res_deep'].to(hidden_states.device, dtype=hidden_states.dtype)
+                          high_res_deep = image_embeds_dict['image_embeds_high_res_deep'].to(hidden_states.device, dtype=hidden_states.dtype)
+
+                          proj_output = projector(
+                              low_res_shallow=low_res_shallow,
+                              low_res_deep=low_res_deep,
+                              high_res_deep=high_res_deep,
+                              timesteps=timestep.to(dtype=hidden_states.dtype),
+                              need_temb=False # We only need the projected embeddings here
+                          )
+                          if isinstance(proj_output, tuple):
+                              ip_hidden_states = proj_output[0]
+                          else:
+                              ip_hidden_states = proj_output
+            else:
+                 if scale <= 0: print("IP-Adapter scale is 0, skipping projection.")
+                 if timestep is None: print("Warning: Timestep not found for IP-Adapter projection.")
+
+        else:
+            # print("IP-Adapter conditioning data not found on model or incomplete.")
+            pass # No IP-Adapter effect if data is missing
+
+
+        # Original Attention Calculation starts here
         batch_size, _, _ = hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape
 
         # `sample` projections.
@@ -43,13 +104,41 @@ class FluxIPAttnProcessor(nn.Module):
         key = attn.to_k(hidden_states)
         value = attn.to_v(hidden_states)
 
-        # IPadapter
-        ip_hidden_states = self._get_ip_hidden_states(
-            attn, 
-            query if encoder_hidden_states is not None else query[:, emb_dict['length_encoder_hidden_states']:],
-            subject_emb_dict.get('ip_hidden_states', None)
-        )
+        # Calculate IP-Adapter attention contribution if ip_hidden_states are available
+        ip_attn_contribution = None
+        if ip_hidden_states is not None and scale > 0:
+             # Use the IP-Adapter's K, V projections with the projected image embeddings
+             # Note: query comes from the main hidden_states
+             ip_key = self.to_k_ip(ip_hidden_states)
+             ip_value = self.to_v_ip(ip_hidden_states)
 
+             # Apply norms if they exist (RMSNorm in this class)
+             # Query norm needs to happen *after* potential rotary embeddings if used
+             # Key norm:
+             ip_key = self.norm_ip_k(rearrange(ip_key, 'b l (h d) -> b h l d', h=attn.heads))
+             ip_key = rearrange(ip_key, 'b h l d -> (b h) l d')
+
+             # Reshape query, ip_key, ip_value for attention
+             inner_dim = key.shape[-1]
+             head_dim = inner_dim // attn.heads
+             ip_query_for_ip = self.norm_ip_q(rearrange(query, 'b l (h d) -> b h l d', h=attn.heads))
+             ip_query_for_ip = rearrange(ip_query_for_ip, 'b h l d -> (b h) l d')
+
+             ip_key = attn.head_to_batch_dim(ip_key) # Shape: (bs*heads, num_ip_tokens, head_dim)
+             ip_value = attn.head_to_batch_dim(ip_value) # Shape: (bs*heads, num_ip_tokens, head_dim)
+
+             # Calculate scaled dot product attention between query and ip_key/ip_value
+             ip_attn_contribution = self._scaled_dot_product_attention(
+                 ip_query_for_ip.to(ip_value.dtype),
+                 ip_key.to(ip_value.dtype),
+                 ip_value,
+                 heads=attn.heads
+             ) # Shape: (bs*heads, seq_len, head_dim)
+             ip_attn_contribution = ip_attn_contribution.to(query.dtype)
+             ip_attn_contribution = attn.batch_to_head_dim(ip_attn_contribution) # Shape: (bs, seq_len, inner_dim)
+
+
+        # Reshape main Q, K, V
         inner_dim = key.shape[-1]
         head_dim = inner_dim // attn.heads
 
@@ -106,8 +195,16 @@ class FluxIPAttnProcessor(nn.Module):
                 hidden_states[:, encoder_hidden_states.shape[1] :],
             )
                 
-            if ip_hidden_states is not None:
-                hidden_states = hidden_states + ip_hidden_states * subject_emb_dict.get('scale', 1.0)
+            # Apply IP-Adapter contribution scaled
+            if ip_attn_contribution is not None:
+                 # Check if encoder_hidden_states were used (cross-attention)
+                 if encoder_hidden_states is not None:
+                      # Only add contribution to the non-encoder part of hidden_states
+                      hidden_states[:, encoder_hidden_states.shape[1] :] = \
+                          hidden_states[:, encoder_hidden_states.shape[1] :] + ip_attn_contribution * scale
+                 else:
+                      # Add contribution to all hidden_states (self-attention)
+                      hidden_states = hidden_states + ip_attn_contribution * scale
 
             # linear proj
             hidden_states = attn.to_out[0](hidden_states)
@@ -119,10 +216,14 @@ class FluxIPAttnProcessor(nn.Module):
             return hidden_states, encoder_hidden_states
         else:
 
-            if ip_hidden_states is not None:
-                hidden_states[:, emb_dict['length_encoder_hidden_states']:] = \
-                    hidden_states[:, emb_dict['length_encoder_hidden_states']:] + \
-                    ip_hidden_states * subject_emb_dict.get('scale', 1.0)
+            # Apply IP-Adapter contribution scaled
+            if ip_attn_contribution is not None:
+                 hidden_states = hidden_states + ip_attn_contribution * scale
+
+            # linear proj
+            hidden_states = attn.to_out[0](hidden_states)
+            # dropout
+            hidden_states = attn.to_out[1](hidden_states)
 
             return hidden_states
 
@@ -137,28 +238,6 @@ class FluxIPAttnProcessor(nn.Module):
         return hidden_states
 
 
-    def _get_ip_hidden_states(
-            self, 
-            attn, 
-            img_query, 
-            ip_hidden_states, 
-        ):
-        if ip_hidden_states is None:
-            return None
-        
-        if not hasattr(self, 'to_k_ip') or not hasattr(self, 'to_v_ip'):
-            return None
-
-        ip_query = self.norm_ip_q(rearrange(img_query, 'b l (h d) -> b h l d', h=attn.heads))
-        ip_query = rearrange(ip_query, 'b h l d -> (b h) l d')
-        ip_key = self.to_k_ip(ip_hidden_states)
-        ip_key = self.norm_ip_k(rearrange(ip_key, 'b l (h d) -> b h l d', h=attn.heads))
-        ip_key = rearrange(ip_key, 'b h l d -> (b h) l d')
-        ip_value = self.to_v_ip(ip_hidden_states)
-        ip_value = attn.head_to_batch_dim(ip_value)
-        ip_hidden_states = self._scaled_dot_product_attention(
-            ip_query.to(ip_value.dtype), ip_key.to(ip_value.dtype), ip_value, None, attn.heads)
-        ip_hidden_states = ip_hidden_states.to(img_query.dtype)
-        ip_hidden_states = attn.batch_to_head_dim(ip_hidden_states)
-        return ip_hidden_states
+    # This helper function is replaced by the logic integrated into __call__
+    # def _get_ip_hidden_states( ... )
 
