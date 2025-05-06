@@ -70,6 +70,8 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
         # Assign FLUX components from flux_unet_model_object
         # These attributes are based on typical ComfyUI MODEL object structure and FLUX needs
         self.transformer = flux_unet_model_object.model
+        if not hasattr(self.transformer, 'attn_processors'):
+            self.transformer.attn_processors = {}
         self.vae = vae_module
         
         # Text encoders, tokenizers, and scheduler are expected to be part of flux_unet_model_object
@@ -149,7 +151,7 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
                 hidden_size=flux_transformer_hidden_size,
                 ip_hidden_states_dim=flux_text_encoder_dim,
             ).to(device, dtype=dtype)
-        self.transformer.set_attn_processor(attn_procs)
+        self.transformer.attn_processors = attn_procs
         
         tmp_ip_layers = torch.nn.ModuleList(list(self.transformer.attn_processors.values())) # Ensure it's a list for ModuleList
         if "ip_adapter" in ipadapter_state_dict:
