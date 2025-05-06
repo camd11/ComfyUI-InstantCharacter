@@ -5,115 +5,89 @@ import folder_paths
 from PIL import Image
 import numpy as np
 
-
-# Add the parent directory to the Python path so we can import from easycontrol
+# Add the parent directory to the Python path so we can import
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from InstantCharacter.pipeline import InstantCharacterFluxPipeline
-from huggingface_hub import login
+# Removed: from huggingface_hub import login
 
-
+# Ensure 'ipadapter' path is registered if not already (though IPAdapterModelLoader should handle this)
 if "ipadapter" not in folder_paths.folder_names_and_paths:
     current_paths = [os.path.join(folder_paths.models_dir, "ipadapter")]
-else:
-    current_paths, _ = folder_paths.folder_names_and_paths["ipadapter"]
-folder_paths.folder_names_and_paths["ipadapter"] = (current_paths, folder_paths.supported_pt_extensions)
+    folder_paths.folder_names_and_paths["ipadapter"] = (current_paths, folder_paths.supported_pt_extensions)
 
 
-class InstantCharacterLoadModelFromLocal:
+class InstantCharacterLoader:
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                # 模型路径输入替换为 STRING 类型，用户可手动输入路径
-                "base_model_path": ("STRING", {"default": "models/FLUX.1-dev", "tooltip": ""}),
-                "image_encoder_path": ("STRING", {"default": "models/google/siglip-so400m-patch14-384", "tooltip": ""}),
-                "image_encoder_2_path": ("STRING", {"default": "models/facebook/dinov2-giant", "tooltip": ""}),
-                "ip_adapter_path": ("STRING", {"default": "models/InstantCharacter/instantcharacter_ip-adapter.bin", "tooltip": ""}),
-                "cpu_offload": ("BOOLEAN", {"default": False, "tooltip": "是否启用CPU卸载以节省显存"}),
-            }
+                "flux_unet_model": ("MODEL", {}),        # From GGUF Unet Loader or standard UNet Loader
+                "siglip_vision_model": ("CLIP_VISION", {}), # From CLIP Vision Loader (for SigLIP)
+                "dinov2_vision_model": ("CLIP_VISION", {}), # From CLIP Vision Loader (for DINOv2)
+                "ipadapter_model_data": ("IPADAPTER", {}), # From IPAdapter Model Loader
+                "cpu_offload": ("BOOLEAN", {"default": False}),
+            },
+            # Optional inputs if not bundled in `flux_unet_model` (MODEL type):
+            # "flux_vae": ("VAE", {}),
+            # "flux_text_encoder_one": ("CLIP", {}), # Or appropriate type for FLUX text encoder 1
+            # "flux_text_encoder_two": ("CLIP", {}), # Or appropriate type for FLUX text encoder 2
         }
 
     RETURN_TYPES = ("INSTANTCHAR_PIPE",)
-    FUNCTION = "load_model"
+    FUNCTION = "load_pipe_from_models"
     CATEGORY = "InstantCharacter"
-    DESCRIPTION = "加载InstantCharacter模型并支持自定义模型路径"
-    
-    def load_model(self, base_model_path, image_encoder_path, image_encoder_2_path, ip_adapter_path, cpu_offload):
+    DESCRIPTION = "Loads InstantCharacter pipeline from pre-loaded model components."
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+    def load_pipe_from_models(self,
+                              flux_unet_model,
+                              siglip_vision_model,
+                              dinov2_vision_model,
+                              ipadapter_model_data,
+                              cpu_offload,
+                              # flux_vae=None, flux_text_encoder_one=None, flux_text_encoder_two=None # If passed separately
+                             ):
+
+        # Determine device and dtype, e.g., from an input model or ComfyUI's model_management
+        # device = comfy.model_management.get_torch_device() # ComfyUI preferred way
+        # dtype = comfy.model_management.VAE_DTYPE # Or infer, e.g. flux_unet_model.model.dtype
+        # For now, pipeline will infer from flux_unet_model.model.device and use its own default dtype or infer.
         
-        pipe = InstantCharacterFluxPipeline.from_pretrained(base_model_path, torch_dtype=torch.bfloat16)
+        # Validate ipadapter_model_data structure
+        if not isinstance(ipadapter_model_data, dict) or \
+           "ip_adapter" not in ipadapter_model_data or \
+           "image_proj" not in ipadapter_model_data:
+            raise ValueError(
+                "IPAdapter model data is not in the expected dictionary format "
+                "with 'ip_adapter' and 'image_proj' keys containing state_dicts."
+            )
 
-        # Initialize adapter first
-        pipe.init_adapter(
-            image_encoder_path=image_encoder_path,
-            image_encoder_2_path=image_encoder_2_path,
-            subject_ipadapter_cfg=dict(subject_ip_adapter_path=ip_adapter_path, nb_token=1024),
+        # Instantiate the refactored pipeline
+        # The pipeline's __init__ will handle device placement of its own new modules
+        # based on the device of flux_unet_model.
+        pipe = InstantCharacterFluxPipeline(
+            flux_unet_model_object=flux_unet_model,
+            siglip_vision_model_object=siglip_vision_model,
+            dinov2_vision_model_object=dinov2_vision_model,
+            ipadapter_model_data_dict=ipadapter_model_data,
+            # dtype can be passed if needed, otherwise pipeline uses its default
         )
 
-        # Then move to device or enable offloading
+        # CPU Offload:
+        # ComfyUI's model management handles device placement for input MODEL, CLIP_VISION.
+        # The pipeline initializes its new components (attn_procs, image_proj) on the device
+        # of the input UNet. If specific offloading methods were on the pipeline (like Diffusers),
+        # they could be called here. For now, we rely on ComfyUI's management of input models.
         if cpu_offload:
-            print("Enabling CPU offload for InstantCharacter pipeline...")
-            pipe.enable_sequential_cpu_offload()
-            print("CPU offload enabled.")
-        else:
-            pipe.to(device)
-
-        return (pipe,)
-
-
-class InstantCharacterLoadModel:
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "hf_token": ("STRING", {"default": "", "multiline": True}),
-                "ip_adapter_name": (folder_paths.get_filename_list("ipadapter"), ),
-                "cpu_offload": ("BOOLEAN", {"default": False})
-            }
-        }
-    
-    RETURN_TYPES = ("INSTANTCHAR_PIPE",)
-    FUNCTION = "load_model"
-    CATEGORY = "InstantCharacter"
-
-    def load_model(self, hf_token, ip_adapter_name, cpu_offload):
-        login(token=hf_token)
-        base_model = "black-forest-labs/FLUX.1-dev"
-        image_encoder_path = "google/siglip-so400m-patch14-384"
-        image_encoder_2_path = "facebook/dinov2-giant"
-        cache_dir = folder_paths.get_folder_paths("diffusers")[0]
-        image_encoder_cache_dir = folder_paths.get_folder_paths("clip_vision")[0]
-        image_encoder_2_cache_dir = folder_paths.get_folder_paths("clip_vision")[0]
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        ip_adapter_path = folder_paths.get_full_path("ipadapter", ip_adapter_name)
-        
-        pipe = InstantCharacterFluxPipeline.from_pretrained(
-            base_model, 
-            torch_dtype=torch.bfloat16,
-            cache_dir=cache_dir,
-        )
-
-        # Initialize adapter first
-        pipe.init_adapter(
-            image_encoder_path=image_encoder_path,
-            cache_dir=image_encoder_cache_dir,
-            image_encoder_2_path=image_encoder_2_path,
-            cache_dir_2=image_encoder_2_cache_dir,
-            subject_ipadapter_cfg=dict(
-                subject_ip_adapter_path=ip_adapter_path,
-                nb_token=1024
-            ),
-        )
-
-        # Then move to device or enable offloading
-        if cpu_offload:
-            print("Enabling CPU offload for InstantCharacter pipeline...")
-            pipe.enable_sequential_cpu_offload()
-            print("CPU offload enabled.")
-        else:
-            pipe.to(device)
+            print("InstantCharacter: CPU offload requested for input models is managed by ComfyUI loaders.")
+            print("InstantCharacterPipeline initializes its internal components on the UNet's device.")
+            # If `pipe` had a method like `pipe.enable_sequential_cpu_offload()` and it was desired:
+            # try:
+            #     pipe.enable_sequential_cpu_offload()
+            #     print("InstantCharacterPipeline: Attempted sequential CPU offload.")
+            # except AttributeError:
+            #     print("InstantCharacterPipeline: Does not have enable_sequential_cpu_offload method.")
+            pass # Primary offload is via ComfyUI's handling of the input model objects
 
         return (pipe,)
 
@@ -124,13 +98,15 @@ class InstantCharacterGenerate:
         return {
             "required": {
                 "pipe": ("INSTANTCHAR_PIPE",),
-                "prompt": ("STRING", {"multiline": True}),
-                "height": ("INT", {"default": 768, "min": 256, "max": 2048, "step": 64}),
-                "width": ("INT", {"default": 1024, "min": 256, "max": 2048, "step": 64}),
-                "guidance_scale": ("FLOAT", {"default": 3.5, "min": 0.0, "max": 10.0, "step": 0.1}),
-                "num_inference_steps": ("INT", {"default": 28, "min": 1, "max": 100, "step": 1}),
+                "prompt": ("STRING", {"multiline": True, "default": "A photo of a character"}),
+                "height": ("INT", {"default": 1024, "min": 256, "max": 4096, "step": 64}),
+                "width": ("INT", {"default": 1024, "min": 256, "max": 4096, "step": 64}),
+                "guidance_scale": ("FLOAT", {"default": 7.5, "min": 0.0, "max": 20.0, "step": 0.1}),
+                "num_inference_steps": ("INT", {"default": 20, "min": 1, "max": 100, "step": 1}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
-                "subject_scale": ("FLOAT", {"default": 0.9, "min": 0.0, "max": 2.0, "step": 0.1}),
+                "subject_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01}),
+                # Added negative_prompt based on typical pipeline usage
+                "negative_prompt": ("STRING", {"multiline": True, "default": "ugly, disfigured, low quality, blurry, nsfw"}),
             },
             "optional": {
                 "subject_image": ("IMAGE",),
@@ -141,40 +117,76 @@ class InstantCharacterGenerate:
     FUNCTION = "generate"
     CATEGORY = "InstantCharacter"
 
-    def generate(self, pipe, prompt, height, width, guidance_scale, 
-                num_inference_steps, seed, subject_scale, subject_image=None):
+    def generate(self, pipe: InstantCharacterFluxPipeline, prompt, height, width, guidance_scale, 
+                 num_inference_steps, seed, subject_scale, negative_prompt="", subject_image=None):
         
-        # Convert subject image from tensor to PIL if provided
         subject_image_pil = None
         if subject_image is not None:
             if isinstance(subject_image, torch.Tensor):
-                if subject_image.dim() == 4:  # [batch, height, width, channels]
-                    img = subject_image[0].cpu().numpy()
-                else:  # [height, width, channels]
-                    img = subject_image.cpu().numpy()
-                subject_image_pil = Image.fromarray((img * 255).astype(np.uint8))
-            elif isinstance(subject_image, np.ndarray):
+                # Assuming subject_image is a ComfyUI IMAGE tensor: (batch, H, W, C)
+                if subject_image.dim() == 4 and subject_image.shape[0] == 1:
+                    img_np = subject_image[0].cpu().numpy() # Select first image in batch
+                elif subject_image.dim() == 3: # H, W, C
+                    img_np = subject_image.cpu().numpy()
+                else:
+                    raise ValueError("subject_image tensor has unexpected dimensions.")
+                subject_image_pil = Image.fromarray((img_np * 255).astype(np.uint8))
+            elif isinstance(subject_image, np.ndarray): # Should not happen with ComfyUI IMAGE type
                 subject_image_pil = Image.fromarray((subject_image * 255).astype(np.uint8))
+            elif isinstance(subject_image, Image.Image): # Already PIL
+                 subject_image_pil = subject_image
+            else:
+                raise TypeError("subject_image must be a ComfyUI IMAGE tensor or PIL.Image.")
         
-        # Generate image
+        if subject_image_pil is None:
+            raise ValueError("Subject image is required for InstantCharacterGenerate.")
+
+        # Generate image using the pipeline's __call__ method
+        # The pipeline's __call__ method is expected to handle device placement internally
         output = pipe(
             prompt=prompt,
+            negative_prompt=negative_prompt, # Pass negative_prompt
             height=height,
             width=width,
             guidance_scale=guidance_scale,
             num_inference_steps=num_inference_steps,
-            generator=torch.Generator("cpu").manual_seed(seed),
+            generator=torch.Generator(device=pipe.device).manual_seed(seed), # Use pipeline's device for generator
             subject_image=subject_image_pil,
             subject_scale=subject_scale,
+            # prompt_2 and negative_prompt_2 can be added if pipeline supports them explicitly
         )
         
-        # Convert PIL image to tensor format
-        image = np.array(output.images[0]) / 255.0
-        image = torch.from_numpy(image).float()
-        
-        # Add batch dimension if needed
-        if image.dim() == 3:
-            image = image.unsqueeze(0)
-        
-        return (image,)
+        # output.images is expected to be a list of PIL Images from the pipeline
+        if not isinstance(output.images, list) or not all(isinstance(img, Image.Image) for img in output.images):
+            raise TypeError("Pipeline did not return a list of PIL Images.")
 
+        # Convert PIL image to ComfyUI IMAGE tensor format (batch, H, W, C)
+        output_images_np = [(np.array(img).astype(np.float32) / 255.0) for img in output.images]
+        output_images_torch = [torch.from_numpy(img_np) for img_np in output_images_np]
+        
+        # Stack if multiple images, otherwise add batch dim
+        if len(output_images_torch) > 1:
+            final_image_tensor = torch.stack(output_images_torch, dim=0)
+        elif output_images_torch:
+            final_image_tensor = output_images_torch[0].unsqueeze(0)
+        else:
+            raise ValueError("Pipeline returned no images.")
+            
+        return (final_image_tensor,)
+
+# --- Node Mappings ---
+NODE_CLASS_MAPPINGS = {
+    "InstantCharacterLoader": InstantCharacterLoader,
+    "InstantCharacterGenerate": InstantCharacterGenerate,
+    # "InstantCharacterLoadModel": REMOVED
+    # "InstantCharacterLoadModelFromLocal": REMOVED
+}
+
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "InstantCharacterLoader": "Load InstantCharacter Pipeline",
+    "InstantCharacterGenerate": "Generate with InstantCharacter",
+}
+
+# Commented out old classes:
+# class InstantCharacterLoadModelFromLocal: ...
+# class InstantCharacterLoadModel: ...
