@@ -316,14 +316,14 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
                 )
 
             # Intermediate output is typically the second element
-            intermediate_outputs.append(res_tuple[1])
+            intermediate_outputs.append(res_tuple[1][:, 1:]) # Exclude CLS token
 
             # Capture final outputs from the last iteration (or any, they should be consistent from the encoder itself)
             # The projected_pooled_output might change if the projection depends on the intermediate layer,
             # but last_hidden_state from the vision_model part should be the same.
             # Let's take them from the last specified index call for consistency.
             if index == required_indices[-1]:
-                last_hidden_state = res_tuple[0]
+                last_hidden_state = res_tuple[0][:, 1:] # Exclude CLS token
                 if len(res_tuple) >= 3:
                     pooled_output = res_tuple[2] # Projected pooled output
                 else:
@@ -343,8 +343,8 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
         # pooled_output can be None if not found, handle accordingly in consuming code if critical
 
         # Combine shallow embeddings
-        # Assuming intermediate outputs are [Batch, SeqLen, Dim_layer], concatenate along feature dim
-        siglip_image_shallow_embeds = torch.cat(intermediate_outputs, dim=-1)
+        # Assuming intermediate outputs are [Batch, SeqLen, Dim_layer], concatenate along sequence dim after CLS stripping
+        siglip_image_shallow_embeds = torch.cat(intermediate_outputs, dim=1)
 
         siglip_image_embeds = last_hidden_state
         # pooled_output is already set
@@ -470,18 +470,43 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
 
         # Determine spatial dimensions (assuming square patch grid)
         B_s, seq_len_siglip, D_siglip = siglip_deep_features.shape
-        H_s = W_s = int(seq_len_siglip**0.5)  # sqrt(729) = 27
+        s_sqrt_siglip = seq_len_siglip**0.5
+        if int(s_sqrt_siglip) * int(s_sqrt_siglip) == seq_len_siglip: # Check if it's a perfect square
+            H_s = W_s = int(s_sqrt_siglip)
+            print(f"[encode_image_emb DEBUG] For SigLIP (len {seq_len_siglip}), using H_s={H_s}, W_s={W_s} (perfect square)")
+        else:
+            found_factors_s = False
+            for h_candidate in range(int(s_sqrt_siglip), 0, -1): # Iterate downwards from int(sqrt(N))
+                if seq_len_siglip % h_candidate == 0:
+                    H_s = h_candidate
+                    W_s = seq_len_siglip // H_s
+                    found_factors_s = True
+                    print(f"[encode_image_emb DEBUG] For SigLIP (len {seq_len_siglip}), found factors H_s={H_s}, W_s={W_s}")
+                    break
+            if not found_factors_s:
+                 raise ValueError(f"Could not find integer factors H_s, W_s for SigLIP sequence length {seq_len_siglip}")
 
         B_d, seq_len_dinov2, D_dinov2 = dinov2_deep_features.shape
-        H_d = W_d = int(seq_len_dinov2**0.5)  # sqrt(1369) = 37
+        s_sqrt_dinov2 = seq_len_dinov2**0.5
+        if int(s_sqrt_dinov2) * int(s_sqrt_dinov2) == seq_len_dinov2: # Check if it's a perfect square
+            H_d = W_d = int(s_sqrt_dinov2)
+            print(f"[encode_image_emb DEBUG] For DINOv2 (len {seq_len_dinov2}), using H_d={H_d}, W_d={W_d} (perfect square)")
+        else:
+            found_factors_d = False
+            for h_candidate_d in range(int(s_sqrt_dinov2), 0, -1): # Iterate downwards from int(sqrt(N))
+                if seq_len_dinov2 % h_candidate_d == 0:
+                    H_d = h_candidate_d
+                    W_d = seq_len_dinov2 // h_candidate_d
+                    found_factors_d = True
+                    print(f"[encode_image_emb DEBUG] For DINOv2 (len {seq_len_dinov2}), found factors H_d={H_d}, W_d={W_d}")
+                    break
+            if not found_factors_d:
+                 raise ValueError(f"Could not find integer factors H_d, W_d for DINOv2 sequence length {seq_len_dinov2}")
 
-        if H_s * W_s != seq_len_siglip:
-            raise ValueError(f"SigLIP deep feature sequence length {seq_len_siglip} is not a perfect square for spatial reshaping.")
-        if H_d * W_d != seq_len_dinov2:
-            raise ValueError(f"DINOv2 deep feature sequence length {seq_len_dinov2} is not a perfect square for spatial reshaping.")
+        # The checks for H_s * W_s == seq_len_siglip and H_d * W_d == seq_len_dinov2 are now implicitly handled by the factorization.
 
         # Reshape SigLIP features for interpolation (B, C, H, W)
-        # (B, SeqLen, Dim) -> (B, Dim, SeqLen) -> (B, Dim, H, W)
+        # (B, SeqLen, Dim) -> (B, Dim, SeqLen) -> (B, Dim, H_s, W_s)
         siglip_deep_features_spatial = siglip_deep_features.permute(0, 2, 1).reshape(B_s, D_siglip, H_s, W_s)
 
         # Interpolate SigLIP features to match DINOv2 spatial dimensions (target: H_d, W_d)
