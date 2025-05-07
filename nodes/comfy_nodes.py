@@ -63,65 +63,46 @@ class InstantCharacterLoader:
         # Get CLIP Input (from method argument)
         clip_input_one = flux_text_encoder_one # This is the key input now
         
-        # Assign the prepared text encoders and tokenizers to the flux_unet_model object
-        # The pipeline will expect to find them there using _1 and _2 suffixes.
+        # Corrected logic for extracting text encoder and tokenizer components
+        # from the composite CLIP object (flux_text_encoder_one).
 
-        clip_l_object_to_use = None
-        t5xxl_object_to_use = None
+        text_encoder_1_module = None
+        tokenizer_1_instance = None
+        text_encoder_2_module = None
+        tokenizer_2_instance = None
 
-        if clip_input_one: # clip_input_one is flux_text_encoder_one
-            if hasattr(clip_input_one, 'clip_l') and hasattr(clip_input_one, 't5xxl'):
-                print("InstantCharacterLoader: Detected composite FluxClipModel in 'flux_text_encoder_one'. Extracting 'clip_l' and 't5xxl'.")
-                clip_l_object_to_use = getattr(clip_input_one, 'clip_l', None)
-                t5xxl_object_to_use = getattr(clip_input_one, 't5xxl', None)
+        if clip_input_one: # clip_input_one is flux_text_encoder_one from inputs
+            # Check for tokenizer attribute
+            if hasattr(clip_input_one, 'tokenizer') and clip_input_one.tokenizer is not None:
+                # Extract CLIP-L tokenizer
+                if hasattr(clip_input_one.tokenizer, 'clip_l'):
+                    tokenizer_1_instance = clip_input_one.tokenizer.clip_l
                 
-                # --- BEGIN DEBUG PRINTS ---
-                print(f"[InstantCharacterLoader DEBUG] Extracted clip_l_object_to_use: {type(clip_l_object_to_use)}")
-                if clip_l_object_to_use:
-                    print(f"[InstantCharacterLoader DEBUG]   clip_l_object_to_use.cond_stage_model: {type(getattr(clip_l_object_to_use, 'cond_stage_model', None))}")
-                    print(f"[InstantCharacterLoader DEBUG]   clip_l_object_to_use.tokenizer: {type(getattr(clip_l_object_to_use, 'tokenizer', None))}")
+                # Extract T5XXL tokenizer
+                if hasattr(clip_input_one.tokenizer, 't5xxl'):
+                    tokenizer_2_instance = clip_input_one.tokenizer.t5xxl
+            
+            # Check for cond_stage_model attribute
+            if hasattr(clip_input_one, 'cond_stage_model') and clip_input_one.cond_stage_model is not None:
+                # Extract CLIP-L text encoder module
+                if hasattr(clip_input_one.cond_stage_model, 'clip_l'):
+                    text_encoder_1_module = clip_input_one.cond_stage_model.clip_l
                 
-                print(f"[InstantCharacterLoader DEBUG] Extracted t5xxl_object_to_use: {type(t5xxl_object_to_use)}")
-                if t5xxl_object_to_use:
-                    print(f"[InstantCharacterLoader DEBUG]   t5xxl_object_to_use.cond_stage_model: {type(getattr(t5xxl_object_to_use, 'cond_stage_model', None))}")
-                    print(f"[InstantCharacterLoader DEBUG]   t5xxl_object_to_use.tokenizer: {type(getattr(t5xxl_object_to_use, 'tokenizer', None))}")
-                # --- END DEBUG PRINTS ---
-            else:
-                # Assume it's a single CLIP model intended for the first slot
-                print("InstantCharacterLoader: 'flux_text_encoder_one' is a single CLIP model or not a composite. Assigning as primary.")
-                clip_l_object_to_use = clip_input_one
-                # t5xxl_object_to_use remains None, will be handled below
+                # Extract T5XXL text encoder module
+                if hasattr(clip_input_one.cond_stage_model, 't5xxl'):
+                    text_encoder_2_module = clip_input_one.cond_stage_model.t5xxl
+        
+        # Attach the extracted (or None) components to the flux_unet_model object.
+        # The pipeline (InstantCharacterFluxPipeline) expects to find these attributes on flux_unet_model.
+        if flux_unet_model:
+            flux_unet_model.text_encoder_1 = text_encoder_1_module
+            flux_unet_model.tokenizer_1 = tokenizer_1_instance
+            flux_unet_model.text_encoder_2 = text_encoder_2_module
+            flux_unet_model.tokenizer_2 = tokenizer_2_instance
+            print("InstantCharacterLoader: Assigned extracted/default text encoders and tokenizers to flux_unet_model.")
         else:
-            print("InstantCharacterLoader: 'flux_text_encoder_one' is None. Both text encoders will be None.")
-            # clip_l_object_to_use and t5xxl_object_to_use remain None
-
-        # Handle first text encoder (clip_l)
-        if clip_l_object_to_use and hasattr(clip_l_object_to_use, 'cond_stage_model') and hasattr(clip_l_object_to_use, 'tokenizer'):
-            flux_unet_model.text_encoder_1 = clip_l_object_to_use.cond_stage_model
-            flux_unet_model.tokenizer_1 = clip_l_object_to_use.tokenizer
-            print("InstantCharacterLoader: Assigned text_encoder_1 and tokenizer_1 from clip_l_object_to_use.")
-        else:
-            flux_unet_model.text_encoder_1 = None
-            flux_unet_model.tokenizer_1 = None
-            if clip_l_object_to_use:
-                print("Warning: clip_l_object_to_use ('flux_text_encoder_one' or its 'clip_l' attribute) found but lacks .cond_stage_model or .tokenizer. Setting text_encoder_1/tokenizer_1 to None.")
-            else:
-                print("InstantCharacterLoader: clip_l_object_to_use (derived from 'flux_text_encoder_one') is None. Setting text_encoder_1/tokenizer_1 to None.")
-
-
-        # Handle second text encoder (t5xxl)
-        if t5xxl_object_to_use and hasattr(t5xxl_object_to_use, 'cond_stage_model') and hasattr(t5xxl_object_to_use, 'tokenizer'):
-            flux_unet_model.text_encoder_2 = t5xxl_object_to_use.cond_stage_model
-            flux_unet_model.tokenizer_2 = t5xxl_object_to_use.tokenizer
-            print("InstantCharacterLoader: Assigned text_encoder_2 and tokenizer_2 from t5xxl_object_to_use.")
-        else:
-            flux_unet_model.text_encoder_2 = None
-            flux_unet_model.tokenizer_2 = None
-            if t5xxl_object_to_use:
-                print("Warning: t5xxl_object_to_use (the 't5xxl' attribute from 'flux_text_encoder_one') found but lacks .cond_stage_model or .tokenizer. Setting text_encoder_2/tokenizer_2 to None.")
-            else:
-                # This case is expected if clip_input_one was not composite or was None.
-                print("InstantCharacterLoader: t5xxl_object_to_use is None (e.g., 'flux_text_encoder_one' was not composite or was missing its 't5xxl' attribute). Setting text_encoder_2/tokenizer_2 to None.")
+            # This case should ideally be prevented by ComfyUI's input validation if MODEL is required.
+            print("InstantCharacterLoader WARNING: flux_unet_model is None. Cannot attach text encoder/tokenizer components.")
         
         pipe = InstantCharacterFluxPipeline(
             flux_unet_model_object=flux_unet_model, # Now contains text_encoders/tokenizers

@@ -309,19 +309,18 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
         prompt_2: Optional[Union[str, List[str]]],
         device,
         num_images_per_prompt: int,
-        max_sequence_length: int,
-        # Other params like do_classifier_free_guidance, negative_prompt etc. are handled by __call__ logic
+        max_sequence_length: int, # Max sequence length for T5/common padding
     ):
         missing_components = []
         if not self.tokenizer_1:
             missing_components.append("Tokenizer One (self.tokenizer_1)")
         if not self.text_encoder_1:
             missing_components.append("Text Encoder One (self.text_encoder_1)")
-        if not self.tokenizer_2: # Now mandatory again
+        if not self.tokenizer_2:
             missing_components.append("Tokenizer Two (self.tokenizer_2)")
-        if not self.text_encoder_2: # Now mandatory again
+        if not self.text_encoder_2:
             missing_components.append("Text Encoder Two (self.text_encoder_2)")
-        
+
         if missing_components:
             raise ValueError(
                 f"The following MANDATORY text processing components are missing or not initialized: {', '.join(missing_components)}. "
@@ -329,89 +328,184 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
                 "is connected to the flux_text_encoder_one input of the InstantCharacterLoader node."
             )
 
-        if prompt_2 is None:
-            prompt_2 = prompt
-
-        # Tokenize and encode with first text encoder (e.g., CLIP L for FLUX)
-        text_inputs_one = self.tokenizer_1(
-            prompt,
-            padding="max_length",
-            max_length=max_sequence_length, # self.tokenizer.model_max_length often 77 for CLIP
-            truncation=True,
-            return_tensors="pt",
-        )
-        text_ids_one = text_inputs_one.input_ids
-        untruncated_ids = self.tokenizer_1(prompt, padding="longest", return_tensors="pt").input_ids
-        if untruncated_ids.shape[-1] >= text_ids_one.shape[-1] and not torch.equal(text_ids_one, untruncated_ids):
-            removed_text = self.tokenizer_1.batch_decode(untruncated_ids[:, self.tokenizer_1.model_max_length - 1 : -1])
-            print(f"Warning: The following part of your input was truncated because CLIP can only handle sequences up to {self.tokenizer_1.model_max_length} tokens: {removed_text}")
-        
-        prompt_embeds_one_output = self.text_encoder_1(text_ids_one.to(device), output_hidden_states=True)
-        # FLUX might use specific hidden states or pooled output, this is a general CLIP approach
-        # pooled_prompt_embeds_one = prompt_embeds_one_output.pooled_output # Typically not used from first encoder in FLUX
-        prompt_embeds_one = prompt_embeds_one_output.last_hidden_state
-
-        # Initialize outputs from the second text encoder
-        prompt_embeds_two = None
-        pooled_prompt_embeds = None
-        text_ids_two = None
-
-        # Tokenize and encode with second text encoder (MANDATORY)
-        text_inputs_two = self.tokenizer_2(
-            prompt_2,
-            padding="max_length",
-            max_length=max_sequence_length,
-            truncation=True,
-            return_tensors="pt",
-        )
-        text_ids_two = text_inputs_two.input_ids
-        untruncated_ids_two = self.tokenizer_2(prompt_2, padding="longest", return_tensors="pt").input_ids
-        if untruncated_ids_two.shape[-1] >= text_ids_two.shape[-1] and not torch.equal(text_ids_two, untruncated_ids_two):
-            removed_text_two = self.tokenizer_2.batch_decode(untruncated_ids_two[:, self.tokenizer_2.model_max_length - 1 : -1])
-            print(f"Warning: The following part of your input was truncated because Text Encoder 2 can only handle sequences up to {self.tokenizer_2.model_max_length} tokens: {removed_text_two}")
-
-        prompt_embeds_two_output = self.text_encoder_2(text_ids_two.to(device), output_hidden_states=True)
-        prompt_embeds_two = prompt_embeds_two_output.last_hidden_state
-        
-        # Pooled output typically comes from the second (often larger) text encoder in FLUX
-        if hasattr(prompt_embeds_two_output, 'pooled_output'):
-            pooled_prompt_embeds = prompt_embeds_two_output.pooled_output
+        # Batch handling for prompts
+        if isinstance(prompt, str):
+            batch_size = 1
+            prompts = [prompt]
+            if prompt_2 is None:
+                prompts_2 = [prompt] # Use main prompt if prompt_2 is None
+            elif isinstance(prompt_2, str):
+                prompts_2 = [prompt_2]
+            else: # prompt_2 is a list
+                 raise ValueError("Prompt is a string, but prompt_2 is a list. Mismatched batching.")
+        elif isinstance(prompt, list):
+            batch_size = len(prompt)
+            prompts = prompt
+            if prompt_2 is None:
+                prompts_2 = prompts
+            elif isinstance(prompt_2, list) and len(prompt_2) == batch_size:
+                prompts_2 = prompt_2
+            else:
+                raise ValueError("If prompt is a list, prompt_2 must be None or a list of the same length.")
         else:
-            # Fallback or warning if pooled_output is expected but not found
-            print("Warning: Text Encoder 2 output does not have 'pooled_output'. Pooled embeddings will be None.")
-            # If T5XXL is mandatory, its pooled output is usually expected. Consider raising an error or ensuring it's always present.
-            # For now, allowing None to match previous logic if attribute is missing, but the check at start of function makes text_encoder_2 mandatory.
+            raise TypeError("Prompt must be a string or a list of strings.")
 
-        # Combine embeddings
-        prompt_embeds = torch.cat((prompt_embeds_one, prompt_embeds_two), dim=-1)
+        # Initialize lists to store results for each batch item
+        batch_prompt_embeds_1_list = []
+        batch_pooled_embeds_1_list = []
+        batch_text_ids_1_padded_list = []
+
+        batch_prompt_embeds_2_list = []
+        batch_pooled_embeds_2_list = []
+        batch_text_ids_2_padded_list = []
+
+        for i in range(batch_size):
+            current_prompt_1 = prompts[i]
+            current_prompt_2 = prompts_2[i]
+
+            # --- Encoder 1 (e.g., CLIP L) ---
+            token_data_one = self.tokenizer_1.tokenize_with_weights(current_prompt_1)
+            
+            encoder_output_1 = self.text_encoder_1.encode_token_weights(token_data_one)
+            prompt_embeds_1_single = None
+            pooled_embeds_1_single = None
+            if isinstance(encoder_output_1, tuple) and len(encoder_output_1) == 2:
+                prompt_embeds_1_single, pooled_embeds_1_single = encoder_output_1
+            elif torch.is_tensor(encoder_output_1):
+                prompt_embeds_1_single = encoder_output_1
+            else:
+                raise ValueError("Text Encoder 1 returned unexpected output type.")
+            
+            if prompt_embeds_1_single is None:
+                 raise ValueError(f"Text Encoder 1 failed to produce embeddings for prompt: {current_prompt_1}")
+
+            batch_prompt_embeds_1_list.append(prompt_embeds_1_single)
+            if pooled_embeds_1_single is not None:
+                batch_pooled_embeds_1_list.append(pooled_embeds_1_single)
+
+            # Padded text_ids for UNet from tokenizer_1
+            text_inputs_one_padded = self.tokenizer_1.tokenize(
+                text=current_prompt_1,
+                padding="max_length",
+                max_length=self.tokenizer_1.model_max_length, # CLIP's own max length
+                truncation=True,
+                return_tensors="pt",
+            )
+            text_ids_1_single_padded = text_inputs_one_padded['input_ids'].to(device) # Should be (1, seq_len)
+            batch_text_ids_1_padded_list.append(text_ids_1_single_padded)
+
+            # Truncation warning for tokenizer_1
+            untruncated_inputs_one = self.tokenizer_1.tokenize(text=current_prompt_1, padding="longest", return_tensors="pt")
+            untruncated_ids_one = untruncated_inputs_one['input_ids']
+            if untruncated_ids_one.shape[-1] > text_ids_1_single_padded.shape[-1] and not torch.equal(text_ids_1_single_padded, untruncated_ids_one[:, :self.tokenizer_1.model_max_length]):
+                removed_text_one = self.tokenizer_1.decode(untruncated_ids_one[0, self.tokenizer_1.model_max_length:].tolist()) # decode expects list of ids
+                print(f"Warning (Tokenizer 1): Part of your input was truncated: \"{removed_text_one}\"")
+
+
+            # --- Encoder 2 (e.g., T5XXL) ---
+            token_data_two = self.tokenizer_2.tokenize_with_weights(current_prompt_2)
+
+            encoder_output_2 = self.text_encoder_2.encode_token_weights(token_data_two)
+            prompt_embeds_2_single = None
+            pooled_embeds_2_single = None
+            if isinstance(encoder_output_2, tuple) and len(encoder_output_2) == 2:
+                prompt_embeds_2_single, pooled_embeds_2_single = encoder_output_2
+            elif torch.is_tensor(encoder_output_2):
+                prompt_embeds_2_single = encoder_output_2
+            else:
+                raise ValueError("Text Encoder 2 returned unexpected output type.")
+
+            if prompt_embeds_2_single is None:
+                 raise ValueError(f"Text Encoder 2 failed to produce embeddings for prompt: {current_prompt_2}")
+
+            batch_prompt_embeds_2_list.append(prompt_embeds_2_single)
+            if pooled_embeds_2_single is not None:
+                batch_pooled_embeds_2_list.append(pooled_embeds_2_single)
+            else: # Fallback for pooled if T5 didn't provide it (should be rare)
+                pooled_dim_2 = getattr(self.text_encoder_2.config, 'd_model', 4096)
+                batch_pooled_embeds_2_list.append(torch.zeros(1, pooled_dim_2, device=device, dtype=self.dtype))
+
+
+            # Padded text_ids for UNet from tokenizer_2
+            text_inputs_two_padded = self.tokenizer_2.tokenize(
+                text=current_prompt_2,
+                padding="max_length",
+                max_length=max_sequence_length, # Use the common max_sequence_length for T5
+                truncation=True,
+                return_tensors="pt",
+            )
+            text_ids_2_single_padded = text_inputs_two_padded['input_ids'].to(device) # Should be (1, seq_len)
+            batch_text_ids_2_padded_list.append(text_ids_2_single_padded)
+            
+            # Truncation warning for tokenizer_2
+            untruncated_inputs_two = self.tokenizer_2.tokenize(text=current_prompt_2, padding="longest", return_tensors="pt")
+            untruncated_ids_two = untruncated_inputs_two['input_ids']
+            if untruncated_ids_two.shape[-1] > text_ids_2_single_padded.shape[-1] and not torch.equal(text_ids_2_single_padded, untruncated_ids_two[:, :max_sequence_length]):
+                removed_text_two = self.tokenizer_2.decode(untruncated_ids_two[0, max_sequence_length:].tolist())
+                print(f"Warning (Tokenizer 2): Part of your input was truncated: \"{removed_text_two}\"")
+
+        # Consolidate batched results
+        prompt_embeds_1 = torch.cat(batch_prompt_embeds_1_list, dim=0)
+        text_ids_1_padded = torch.cat(batch_text_ids_1_padded_list, dim=0)
+        if batch_pooled_embeds_1_list: # Only if pooled output was consistently available
+            pooled_prompt_embeds_1 = torch.cat(batch_pooled_embeds_1_list, dim=0)
+        else: # Fallback if text_encoder_1 never gave pooled output
+            pooled_dim_1 = getattr(self.text_encoder_1.config, 'hidden_size', 768)
+            pooled_prompt_embeds_1 = torch.zeros(batch_size, pooled_dim_1, device=device, dtype=self.dtype)
+
+
+        prompt_embeds_2 = torch.cat(batch_prompt_embeds_2_list, dim=0)
+        text_ids_2_padded = torch.cat(batch_text_ids_2_padded_list, dim=0)
+        pooled_prompt_embeds_2 = torch.cat(batch_pooled_embeds_2_list, dim=0)
+
+
+        # FLUX requires prompt_embeds_1 and prompt_embeds_2 to have the same sequence length
+        # for feature-wise concatenation. Pad the shorter one (usually prompt_embeds_1 from CLIP).
+        # Target sequence length is max_sequence_length (from T5).
+        s1_len = prompt_embeds_1.shape[1]
+        s2_len = prompt_embeds_2.shape[1]
         
-        # Duplicate embeddings for each image per prompt
-        bs_embed, seq_len, _ = prompt_embeds.shape # bs_embed is the original batch size
-        prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
-        prompt_embeds = prompt_embeds.view(bs_embed * num_images_per_prompt, seq_len, -1)
-
-        # Duplicate pooled embeddings
-        # pooled_prompt_embeds should not be None if text_encoder_2 is mandatory and provides it.
-        if pooled_prompt_embeds is None:
-             # This case should ideally not be hit if T5XXL (text_encoder_2) always provides pooled_output
-            print("Critical Warning: pooled_prompt_embeds is None despite text_encoder_2 being mandatory. This may lead to errors.")
-            # Create a zero tensor as a fallback to prevent downstream errors, though this indicates an issue.
-            # The shape of pooled_prompt_embeds depends on the text_encoder_2's config.
-            # Assuming text_encoder_2.config.hidden_size if available, else a common large dim.
-            pooled_dim = getattr(self.text_encoder_2.config, 'hidden_size', 4096)
-            pooled_prompt_embeds = torch.zeros(bs_embed, pooled_dim, device=device, dtype=self.dtype)
-
-
-        bs_embed_pooled, _ = pooled_prompt_embeds.shape
-        pooled_prompt_embeds = pooled_prompt_embeds.repeat(1, num_images_per_prompt)
-        pooled_prompt_embeds = pooled_prompt_embeds.view(bs_embed_pooled * num_images_per_prompt, -1)
+        # Assuming max_sequence_length is the target for both after encoding,
+        # but text_encoder_1 might output shorter sequences (e.g. 77 for CLIP)
+        # and text_encoder_2 might output up to max_sequence_length (e.g. 512 for T5)
+        # We need to align them to `max_sequence_length` for the `cat` on feature dim.
+        # This usually means padding the CLIP embeddings.
         
-        # Prepare text_ids for the transformer - always use text_ids_two as it's mandatory
-        text_ids_for_transformer = text_ids_two.repeat(1, num_images_per_prompt).view(bs_embed * num_images_per_prompt, -1)
+        if s1_len < max_sequence_length:
+            padding_shape = (prompt_embeds_1.shape[0], max_sequence_length - s1_len, prompt_embeds_1.shape[2])
+            padding_tensor = torch.zeros(padding_shape, device=prompt_embeds_1.device, dtype=prompt_embeds_1.dtype)
+            prompt_embeds_1 = torch.cat([prompt_embeds_1, padding_tensor], dim=1)
+        elif s1_len > max_sequence_length:
+            prompt_embeds_1 = prompt_embeds_1[:, :max_sequence_length, :]
+
+        if s2_len < max_sequence_length:
+            padding_shape = (prompt_embeds_2.shape[0], max_sequence_length - s2_len, prompt_embeds_2.shape[2])
+            padding_tensor = torch.zeros(padding_shape, device=prompt_embeds_2.device, dtype=prompt_embeds_2.dtype)
+            prompt_embeds_2 = torch.cat([prompt_embeds_2, padding_tensor], dim=1)
+        elif s2_len > max_sequence_length:
+            prompt_embeds_2 = prompt_embeds_2[:, :max_sequence_length, :]
+            
+        # Combine embeddings: (B, S, D1+D2)
+        prompt_embeds = torch.cat([prompt_embeds_1, prompt_embeds_2], dim=-1)
+        
+        # Pooled embeddings: use from encoder 2 if available, else from encoder 1
+        pooled_prompt_embeds = pooled_prompt_embeds_2 if pooled_prompt_embeds_2 is not None else pooled_prompt_embeds_1
+        if pooled_prompt_embeds is None: # Should not happen with fallbacks
+            raise ValueError("Failed to obtain pooled prompt embeddings from either encoder.")
+
+        # Combine text_ids for UNet: (B, S1_padded + S2_padded)
+        # text_ids_1_padded is (B, 77), text_ids_2_padded is (B, 512)
+        # Resulting text_ids will be (B, 77+512)
+        text_ids = torch.cat([text_ids_1_padded, text_ids_2_padded], dim=1) # Concatenate along sequence dim
+
+        # Duplicate for num_images_per_prompt
+        prompt_embeds = prompt_embeds.repeat_interleave(num_images_per_prompt, dim=0)
+        pooled_prompt_embeds = pooled_prompt_embeds.repeat_interleave(num_images_per_prompt, dim=0)
+        text_ids = text_ids.repeat_interleave(num_images_per_prompt, dim=0)
 
         return prompt_embeds.to(device=device, dtype=self.dtype), \
                pooled_prompt_embeds.to(device=device, dtype=self.dtype), \
-               text_ids_for_transformer.to(device=device)
+               text_ids.to(device=device) # text_ids are already torch.long
 
     # prepare_latents method (simplified, from Diffusers)
     def prepare_latents(self, batch_size, num_channels_latents, height, width, dtype, device, generator, latents=None):
