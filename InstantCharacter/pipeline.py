@@ -5,6 +5,7 @@ from PIL import Image
 from einops import rearrange
 import torch
 import torch.nn as nn # Added
+import torchvision.transforms.functional as TF # Added for preprocessing
 import numpy as np # Added for __call__
 from typing import Union, List, Optional, Dict, Any, Callable # Added for __call__
 
@@ -107,11 +108,30 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
             self.scheduler = None # Placeholder
 
         # Assign Image Encoders from CLIP_VISION objects
-        self.siglip_image_encoder_model = siglip_vision_model_object.model
-        self.siglip_image_processor = siglip_vision_model_object # ComfyUI CLIP_VISION object itself for preprocessing info
+        # Assign Image Encoders from CLIP_VISION objects
+        self.siglip_image_processor = siglip_vision_model_object # This is the wrapper, passed to _comfy_clip_vision_preprocess_pil
+        if siglip_vision_model_object is not None and hasattr(siglip_vision_model_object, 'model'):
+            self.siglip_image_encoder_model = siglip_vision_model_object.model # This is the actual nn.Module for encoding
+            print("InstantCharacterPipeline: Assigned self.siglip_image_encoder_model from siglip_vision_model_object.model.")
+        elif siglip_vision_model_object is not None:
+            # Fallback if .model is not present, but the object itself might be the encoder.
+            # This is less likely for ComfyUI CLIP_VISION wrappers which usually encapsulate a model.
+            print("Warning: siglip_vision_model_object.model not found. Attempting to use siglip_vision_model_object directly as siglip_image_encoder_model.")
+            self.siglip_image_encoder_model = siglip_vision_model_object
+        else:
+            self.siglip_image_encoder_model = None
+            print("Warning: siglip_vision_model_object is None. self.siglip_image_encoder_model set to None.")
 
-        self.dinov2_image_encoder_model = dinov2_vision_model_object.model
-        self.dinov2_image_processor = dinov2_vision_model_object # ComfyUI CLIP_VISION object itself for preprocessing info
+        self.dinov2_image_processor = dinov2_vision_model_object # This is the wrapper
+        if dinov2_vision_model_object is not None and hasattr(dinov2_vision_model_object, 'model'):
+            self.dinov2_image_encoder_model = dinov2_vision_model_object.model # Actual nn.Module
+            print("InstantCharacterPipeline: Assigned self.dinov2_image_encoder_model from dinov2_vision_model_object.model.")
+        elif dinov2_vision_model_object is not None:
+            print("Warning: dinov2_vision_model_object.model not found. Attempting to use dinov2_vision_model_object directly as dinov2_image_encoder_model.")
+            self.dinov2_image_encoder_model = dinov2_vision_model_object
+        else:
+            self.dinov2_image_encoder_model = None
+            print("Warning: dinov2_vision_model_object is None. self.dinov2_image_encoder_model set to None.")
 
         self._initialize_ip_adapter_components(ipadapter_model_data_dict, self.dtype)
 
@@ -179,66 +199,120 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
         else:
             print("Warning: 'image_proj' key not found in ipadapter_state_dict. Image projection weights not loaded.")
 
-    def _comfy_clip_vision_preprocess_pil(self, clip_vision_obj, pil_images_list: List[Image.Image]):
+    def _comfy_clip_vision_preprocess_pil(self, image_processor_obj, pil_image: Image.Image):
         """
-        Helper to preprocess PIL images using ComfyUI's CLIPVision object.
-        This is a placeholder. Actual implementation depends on how ComfyUI's CLIP_VISION
-        objects expose their preprocessing (e.g., if they are callable or have a specific method).
-        For now, assumes it might have a 'preprocess' method or can be called.
-        It should return a pixel_values tensor.
+        Manually preprocesses a single PIL image using parameters from a ComfyUI CLIP_VISION object.
         """
-        # This is a simplified placeholder. ComfyUI's `clip_preprocess` is more complex.
-        # It typically involves converting PIL to tensor (0-1 range), then normalizing.
-        # Example:
-        # comfy_images = []
-        # for pil_image in pil_images_list:
-        #     np_image = np.array(pil_image).astype(np.float32) / 255.0
-        #     comfy_images.append(torch.from_numpy(np_image))
-        # comfy_image_tensor = torch.stack(comfy_images).permute(0, 3, 1, 2) # B, C, H, W
+        if image_processor_obj is None:
+            raise ValueError("image_processor_obj cannot be None for preprocessing.")
+        if pil_image is None:
+            raise ValueError("pil_image cannot be None for preprocessing.")
 
-        # if hasattr(clip_vision_obj, 'preprocess'):
-        #     # Assuming clip_vision_obj.preprocess takes a list of PIL images
-        #     # and returns a tensor of pixel_values
-        #     return clip_vision_obj.preprocess(pil_images_list)
-        # elif callable(clip_vision_obj):
-        #     # This is a guess; ComfyUI CLIP_VISION objects might not be directly callable for preprocessing
-        #     # Or they might expect a ComfyUI-formatted tensor input
-        #     # This part needs to align with how ComfyUI's CLIPLoader makes CLIPVision objects work.
-        #     # For now, let's assume it can take PIL images and return processed tensors.
-        #     # This is highly dependent on the actual ComfyUI CLIP_VISION wrapper.
-        #     # A common pattern is that the CLIPVision object from ComfyUI might have the processor
-        #     # embedded, e.g. clip_vision_obj.processor(images=pil_images_list, return_tensors="pt").pixel_values
-        #     # This matches the old pipeline's direct use of HF processors.
-        if hasattr(clip_vision_obj, 'processor') and callable(clip_vision_obj.processor):
-             return clip_vision_obj.processor(images=pil_images_list, return_tensors="pt").pixel_values.to(self.device, self.dtype)
-        elif hasattr(clip_vision_obj, 'image_processor') and callable(clip_vision_obj.image_processor): # common in some comfy wrappers
-             return clip_vision_obj.image_processor(images=pil_images_list, return_tensors="pt").pixel_values.to(self.device, self.dtype)
+        try:
+            image_size = image_processor_obj.image_size
+            image_mean = image_processor_obj.image_mean
+            image_std = image_processor_obj.image_std
+        except AttributeError as e:
+            raise AttributeError(
+                f"Missing one or more required attributes (image_size, image_mean, image_std) "
+                f"on image_processor_obj (type: {type(image_processor_obj)}). Error: {e}"
+            )
+
+        # 1. Convert to RGB
+        image = pil_image.convert("RGB")
+
+        # 2. Resize and Crop
+        if isinstance(image_size, int):
+            target_size = image_size
+            # Resize shorter side to target_size
+            w, h = image.size
+            if w < h:
+                new_w = target_size
+                new_h = int(h * target_size / w)
+            else:
+                new_h = target_size
+                new_w = int(w * target_size / h)
+            image = image.resize((new_w, new_h), Image.BICUBIC)
+
+            # Center crop to (target_size, target_size)
+            left = (new_w - target_size) / 2
+            top = (new_h - target_size) / 2
+            right = (new_w + target_size) / 2
+            bottom = (new_h + target_size) / 2
+            image = image.crop((left, top, right, bottom))
+            target_height, target_width = target_size, target_size
+        elif isinstance(image_size, (list, tuple)) and len(image_size) == 2:
+            target_height, target_width = image_size
+            # PIL resize uses (width, height)
+            image = image.resize((target_width, target_height), Image.BICUBIC)
         else:
-            # Fallback: if the CLIP_VISION object *is* the processor (like HF processors)
-            try:
-                return clip_vision_obj(images=pil_images_list, return_tensors="pt").pixel_values.to(self.device, self.dtype)
-            except Exception as e:
-                print(f"Warning: Could not preprocess with clip_vision_obj directly: {e}. Preprocessing might fail.")
-                # Return a dummy tensor of expected shape if possible, or raise error
-                # This is a critical part that needs to work with ComfyUI's CLIP_VISION type.
-                # For now, let's assume the object itself is a processor-like callable.
-                # This matches the structure of the original code using HF processors.
-                raise NotImplementedError(
-                    "Preprocessing with ComfyUI CLIP_VISION object needs concrete implementation "
-                    "or verification of its callable nature for preprocessing."
-                )
+            raise ValueError(
+                f"image_size must be an int or a tuple/list of two ints. Got {image_size}"
+            )
+
+        # 3. Convert to Tensor and scale to [0, 1]
+        # Using TF.to_tensor which handles PIL to (C, H, W) tensor and scales to [0,1]
+        image_tensor = TF.to_tensor(image) # Shape: (C, H, W)
+
+        # 4. Normalize
+        if not isinstance(image_mean, (list, tuple)) or not isinstance(image_std, (list, tuple)):
+            raise ValueError("image_mean and image_std must be lists or tuples.")
+        if len(image_mean) != image_tensor.shape[0] or len(image_std) != image_tensor.shape[0]:
+             raise ValueError(f"image_mean/std length ({len(image_mean)}) must match image channels ({image_tensor.shape[0]})")
+
+        # Ensure mean and std are tensors with shape (C, 1, 1) for TF.normalize
+        # TF.normalize expects list/tuple for mean/std, it handles conversion internally.
+        normalized_tensor = TF.normalize(image_tensor, mean=image_mean, std=image_std)
+
+        # 5. Add Batch Dimension
+        pixel_values = normalized_tensor.unsqueeze(0) # Shape: (1, C, H, W)
+
+        return pixel_values.to(device=self.device, dtype=self.dtype)
 
 
     @torch.inference_mode()
     def encode_siglip_image_emb(self, siglip_pixel_values, device, dtype):
-        # siglip_pixel_values are preprocessed tensors.
-        self.siglip_image_encoder_model.to(device, dtype=dtype)
-        # siglip_pixel_values already moved to device by _comfy_clip_vision_preprocess_pil
-        res = self.siglip_image_encoder_model(siglip_pixel_values, output_hidden_states=True)
+        if self.siglip_image_encoder_model is None:
+            raise ValueError("InstantCharacter Pipeline Error: siglip_image_encoder_model is not initialized and is None. Cannot encode SigLIP image embeddings.")
+
+        # Ensure the underlying vision model exists
+        if not hasattr(self.siglip_image_encoder_model, 'vision_model') or self.siglip_image_encoder_model.vision_model is None:
+            raise AttributeError("Could not find the underlying vision model (expected attribute 'vision_model') on the siglip_image_encoder_model.")
+            
+        underlying_vision_model = self.siglip_image_encoder_model.vision_model
+        
+        # Call the UNDERLYING model with output_hidden_states=True
+        # Move pixel values to the correct device/dtype expected by the model
+        model_device = next(underlying_vision_model.parameters()).device # Get model's device
+        model_dtype = next(underlying_vision_model.parameters()).dtype  # Get model's dtype
+        
+        res = underlying_vision_model(
+            pixel_values=siglip_pixel_values.to(device=model_device, dtype=model_dtype), 
+            output_hidden_states=True
+        )
+        
+        # Check if output has expected attributes
+        if not hasattr(res, 'last_hidden_state') or not hasattr(res, 'hidden_states'):
+             raise TypeError(f"Unexpected output type from underlying vision model: {type(res)}. Expected attributes 'last_hidden_state' and 'hidden_states'.")
+
+        # Extract embeddings using attributes from the HF output object
         siglip_image_embeds = res.last_hidden_state
-        # Verify hidden state indices [7, 13, 26] for the specific SigLIP model
-        siglip_image_shallow_embeds = torch.cat([res.hidden_states[i] for i in [7, 13, 26]], dim=1)
-        return siglip_image_embeds, siglip_image_shallow_embeds
+        
+        # Extract specific intermediate hidden states
+        # Ensure hidden_states is a tuple/list and indices are valid
+        hidden_states = res.hidden_states
+        required_indices = [7, 13, 26] # Example indices
+        if not isinstance(hidden_states, (list, tuple)) or not all(isinstance(idx, int) and 0 <= idx < len(hidden_states) for idx in required_indices):
+             raise IndexError(f"Cannot access required hidden state indices {required_indices}. Available hidden states length: {len(hidden_states) if isinstance(hidden_states, (list, tuple)) else 'N/A'}")
+             
+        siglip_image_shallow_embeds = torch.cat([hidden_states[i] for i in required_indices], dim=1)
+        
+        # Handle pooled output if needed (check if attribute exists)
+        siglip_pooled_output = getattr(res, 'pooler_output', None) 
+
+        # Return the necessary outputs (adjust based on what encode_image_emb needs)
+        # Example: returning a tuple consistent with previous attempts
+        return siglip_image_embeds, siglip_pooled_output, siglip_image_shallow_embeds
 
     @torch.inference_mode()
     def encode_dinov2_image_emb(self, dinov2_pixel_values, device, dtype):
@@ -253,9 +327,37 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
 
     @torch.inference_mode()
     def encode_image_emb(self, subject_image_pil: Image.Image, device, dtype):
+        # Input handling for subject_image_pil
+        if isinstance(subject_image_pil, torch.Tensor):
+            # Assuming ComfyUI IMAGE tensor [B, H, W, C], range [0, 1]
+            # Select the first image in the batch
+            if subject_image_pil.ndim == 4 and subject_image_pil.shape[0] > 0:
+                image_tensor_slice = subject_image_pil[0]
+            elif subject_image_pil.ndim == 3: # Handle case if batch dim is missing
+                image_tensor_slice = subject_image_pil
+            else:
+                raise ValueError(f"Unsupported tensor shape for subject_image_pil: {subject_image_pil.shape}")
+            # Convert to numpy HxWxC, range [0, 255], uint8
+            image_np = (image_tensor_slice.cpu().numpy() * 255).astype(np.uint8)
+            # Convert to PIL Image
+            pil_image_to_process = Image.fromarray(image_np, 'RGB')
+        elif isinstance(subject_image_pil, list):
+            # Assuming a list of PIL Images, take the first one
+            if len(subject_image_pil) > 0 and isinstance(subject_image_pil[0], Image.Image):
+                pil_image_to_process = subject_image_pil[0]
+            else:
+                # Handle case where list might contain non-PIL Images or be empty.
+                raise ValueError("Input subject_image_pil is a list, but does not contain a PIL Image at the first position or is empty.")
+        elif isinstance(subject_image_pil, Image.Image):
+            # Input is already a PIL Image
+            pil_image_to_process = subject_image_pil
+        else:
+            raise ValueError(f"Unsupported type for subject_image_pil: {type(subject_image_pil)}")
+
+        # Now use pil_image_to_process for subsequent operations
         # Cropping and resizing logic for low_res and high_res PIL images
-        object_image_pil_low_res = [subject_image_pil.resize((384, 384))]
-        object_image_pil_high_res_orig = subject_image_pil.resize((768, 768))
+        object_image_pil_low_res = pil_image_to_process.resize((384, 384)) # Ensure this is a single PIL image
+        object_image_pil_high_res_orig = pil_image_to_process.resize((768, 768))
         object_image_pil_high_res_crops = [
             object_image_pil_high_res_orig.crop((0, 0, 384, 384)),
             object_image_pil_high_res_orig.crop((384, 0, 768, 384)),
@@ -359,6 +461,13 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
         batch_pooled_embeds_2_list = []
         batch_text_ids_2_padded_list = []
 
+        # Define FLUX standard lengths and pad token IDs based on research
+        clip_l_max_len = 77
+        clip_l_pad_token_id = 49407  # EOS token ID for CLIP-L
+        
+        t5xxl_max_len = 256  # Effective max sequence length for T5XXL in FLUX
+        t5xxl_pad_token_id = 0 # Pad token ID for T5XXL
+
         for i in range(batch_size):
             current_prompt_1 = prompts[i]
             current_prompt_2 = prompts_2[i]
@@ -383,23 +492,35 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
             if pooled_embeds_1_single is not None:
                 batch_pooled_embeds_1_list.append(pooled_embeds_1_single)
 
-            # Padded text_ids for UNet from tokenizer_1
-            text_inputs_one_padded = self.tokenizer_1.tokenize(
-                text=current_prompt_1,
-                padding="max_length",
-                max_length=self.tokenizer_1.model_max_length, # CLIP's own max length
-                truncation=True,
-                return_tensors="pt",
-            )
-            text_ids_1_single_padded = text_inputs_one_padded['input_ids'].to(device) # Should be (1, seq_len)
+            # Padded text_ids for UNet from tokenizer_1 (derived from token_data_one)
+            raw_text_ids_one_single = []
+            if token_data_one: # token_data_one is List[List[Tuple[int, float]]]
+                for chunk in token_data_one:
+                    raw_text_ids_one_single.extend([item[0] for item in chunk]) # item is (token_id, weight)
+            
+            # Use fixed values for CLIP-L
+            # max_len_1 = clip_l_max_len (implicitly used below)
+            # pad_id_1 = clip_l_pad_token_id (implicitly used below)
+
+            # Truncate if necessary
+            truncated_ids_one = raw_text_ids_one_single[:clip_l_max_len]
+            # Pad if necessary
+            padded_ids_1 = truncated_ids_one + [clip_l_pad_token_id] * (clip_l_max_len - len(truncated_ids_one))
+            
+            text_ids_1_single_padded = torch.tensor([padded_ids_1], dtype=torch.long, device=device)
             batch_text_ids_1_padded_list.append(text_ids_1_single_padded)
 
             # Truncation warning for tokenizer_1
-            untruncated_inputs_one = self.tokenizer_1.tokenize(text=current_prompt_1, padding="longest", return_tensors="pt")
-            untruncated_ids_one = untruncated_inputs_one['input_ids']
-            if untruncated_ids_one.shape[-1] > text_ids_1_single_padded.shape[-1] and not torch.equal(text_ids_1_single_padded, untruncated_ids_one[:, :self.tokenizer_1.model_max_length]):
-                removed_text_one = self.tokenizer_1.decode(untruncated_ids_one[0, self.tokenizer_1.model_max_length:].tolist()) # decode expects list of ids
-                print(f"Warning (Tokenizer 1): Part of your input was truncated: \"{removed_text_one}\"")
+            if len(raw_text_ids_one_single) > clip_l_max_len:
+                try:
+                    removed_tokens_one = raw_text_ids_one_single[clip_l_max_len:]
+                    if hasattr(self.tokenizer_1, 'decode') and callable(self.tokenizer_1.decode):
+                        removed_text_one = self.tokenizer_1.decode(removed_tokens_one)
+                        print(f"Warning (Tokenizer 1): Part of your input was truncated: \"{removed_text_one}\"")
+                    else:
+                        print(f"Warning (Tokenizer 1): Input was truncated. Decoder not available for removed part.")
+                except Exception as e:
+                    print(f"Warning (Tokenizer 1): Input was truncated, but could not decode removed part. Error: {e}")
 
 
             # --- Encoder 2 (e.g., T5XXL) ---
@@ -422,27 +543,39 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
             if pooled_embeds_2_single is not None:
                 batch_pooled_embeds_2_list.append(pooled_embeds_2_single)
             else: # Fallback for pooled if T5 didn't provide it (should be rare)
-                pooled_dim_2 = getattr(self.text_encoder_2.config, 'd_model', 4096)
+                pooled_dim_2 = 4096 # Standard d_model for T5XXL in FLUX
                 batch_pooled_embeds_2_list.append(torch.zeros(1, pooled_dim_2, device=device, dtype=self.dtype))
 
 
-            # Padded text_ids for UNet from tokenizer_2
-            text_inputs_two_padded = self.tokenizer_2.tokenize(
-                text=current_prompt_2,
-                padding="max_length",
-                max_length=max_sequence_length, # Use the common max_sequence_length for T5
-                truncation=True,
-                return_tensors="pt",
-            )
-            text_ids_2_single_padded = text_inputs_two_padded['input_ids'].to(device) # Should be (1, seq_len)
+            # Padded text_ids for UNet from tokenizer_2 (derived from token_data_two)
+            raw_text_ids_two_single = []
+            if token_data_two: # token_data_two is List[List[Tuple[int, float]]]
+                for chunk in token_data_two:
+                    raw_text_ids_two_single.extend([item[0] for item in chunk]) # item is (token_id, weight)
+
+            # Use fixed values for T5XXL
+            # max_len_2 = t5xxl_max_len (implicitly used below)
+            # pad_id_2 = t5xxl_pad_token_id (implicitly used below)
+
+            # Truncate if necessary
+            truncated_ids_two = raw_text_ids_two_single[:t5xxl_max_len]
+            # Pad if necessary
+            padded_ids_2 = truncated_ids_two + [t5xxl_pad_token_id] * (t5xxl_max_len - len(truncated_ids_two))
+            
+            text_ids_2_single_padded = torch.tensor([padded_ids_2], dtype=torch.long, device=device)
             batch_text_ids_2_padded_list.append(text_ids_2_single_padded)
             
             # Truncation warning for tokenizer_2
-            untruncated_inputs_two = self.tokenizer_2.tokenize(text=current_prompt_2, padding="longest", return_tensors="pt")
-            untruncated_ids_two = untruncated_inputs_two['input_ids']
-            if untruncated_ids_two.shape[-1] > text_ids_2_single_padded.shape[-1] and not torch.equal(text_ids_2_single_padded, untruncated_ids_two[:, :max_sequence_length]):
-                removed_text_two = self.tokenizer_2.decode(untruncated_ids_two[0, max_sequence_length:].tolist())
-                print(f"Warning (Tokenizer 2): Part of your input was truncated: \"{removed_text_two}\"")
+            if len(raw_text_ids_two_single) > t5xxl_max_len:
+                try:
+                    removed_tokens_two = raw_text_ids_two_single[t5xxl_max_len:]
+                    if hasattr(self.tokenizer_2, 'decode') and callable(self.tokenizer_2.decode):
+                        removed_text_two = self.tokenizer_2.decode(removed_tokens_two)
+                        print(f"Warning (Tokenizer 2): Part of your input was truncated: \"{removed_text_two}\"")
+                    else:
+                        print(f"Warning (Tokenizer 2): Input was truncated. Decoder not available for removed part.")
+                except Exception as e:
+                    print(f"Warning (Tokenizer 2): Input was truncated, but could not decode removed part. Error: {e}")
 
         # Consolidate batched results
         prompt_embeds_1 = torch.cat(batch_prompt_embeds_1_list, dim=0)
@@ -450,7 +583,7 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
         if batch_pooled_embeds_1_list: # Only if pooled output was consistently available
             pooled_prompt_embeds_1 = torch.cat(batch_pooled_embeds_1_list, dim=0)
         else: # Fallback if text_encoder_1 never gave pooled output
-            pooled_dim_1 = getattr(self.text_encoder_1.config, 'hidden_size', 768)
+            pooled_dim_1 = 768 # Standard hidden_size/pooled_dimension for CLIP-L
             pooled_prompt_embeds_1 = torch.zeros(batch_size, pooled_dim_1, device=device, dtype=self.dtype)
 
 
@@ -461,29 +594,27 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
 
         # FLUX requires prompt_embeds_1 and prompt_embeds_2 to have the same sequence length
         # for feature-wise concatenation. Pad the shorter one (usually prompt_embeds_1 from CLIP).
-        # Target sequence length is max_sequence_length (from T5).
+        # Target sequence length is t5xxl_max_len (256 for FLUX T5).
         s1_len = prompt_embeds_1.shape[1]
         s2_len = prompt_embeds_2.shape[1]
         
-        # Assuming max_sequence_length is the target for both after encoding,
-        # but text_encoder_1 might output shorter sequences (e.g. 77 for CLIP)
-        # and text_encoder_2 might output up to max_sequence_length (e.g. 512 for T5)
-        # We need to align them to `max_sequence_length` for the `cat` on feature dim.
-        # This usually means padding the CLIP embeddings.
+        # Align embeddings to t5xxl_max_len.
+        # text_encoder_1 (CLIP) might output shorter sequences (e.g. 77).
+        # text_encoder_2 (T5) might output up to t5xxl_max_len.
         
-        if s1_len < max_sequence_length:
-            padding_shape = (prompt_embeds_1.shape[0], max_sequence_length - s1_len, prompt_embeds_1.shape[2])
+        if s1_len < t5xxl_max_len:
+            padding_shape = (prompt_embeds_1.shape[0], t5xxl_max_len - s1_len, prompt_embeds_1.shape[2])
             padding_tensor = torch.zeros(padding_shape, device=prompt_embeds_1.device, dtype=prompt_embeds_1.dtype)
             prompt_embeds_1 = torch.cat([prompt_embeds_1, padding_tensor], dim=1)
-        elif s1_len > max_sequence_length:
-            prompt_embeds_1 = prompt_embeds_1[:, :max_sequence_length, :]
+        elif s1_len > t5xxl_max_len:
+            prompt_embeds_1 = prompt_embeds_1[:, :t5xxl_max_len, :]
 
-        if s2_len < max_sequence_length:
-            padding_shape = (prompt_embeds_2.shape[0], max_sequence_length - s2_len, prompt_embeds_2.shape[2])
+        if s2_len < t5xxl_max_len:
+            padding_shape = (prompt_embeds_2.shape[0], t5xxl_max_len - s2_len, prompt_embeds_2.shape[2])
             padding_tensor = torch.zeros(padding_shape, device=prompt_embeds_2.device, dtype=prompt_embeds_2.dtype)
             prompt_embeds_2 = torch.cat([prompt_embeds_2, padding_tensor], dim=1)
-        elif s2_len > max_sequence_length:
-            prompt_embeds_2 = prompt_embeds_2[:, :max_sequence_length, :]
+        elif s2_len > t5xxl_max_len:
+            prompt_embeds_2 = prompt_embeds_2[:, :t5xxl_max_len, :]
             
         # Combine embeddings: (B, S, D1+D2)
         prompt_embeds = torch.cat([prompt_embeds_1, prompt_embeds_2], dim=-1)
@@ -865,4 +996,3 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
         print("Reverting LoRA.")
         flux_load_lora(self, lora_file_path, -lora_weight) # Attempt to revert
         return res
-
