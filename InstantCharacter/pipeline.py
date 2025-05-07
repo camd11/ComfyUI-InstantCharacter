@@ -269,27 +269,36 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
 
         return pixel_values.to(device=self.device, dtype=self.dtype)
 
-
     @torch.inference_mode()
     def encode_siglip_image_emb(self, siglip_pixel_values, device, dtype):
-        if self.siglip_image_encoder_model is None:
-            raise ValueError("InstantCharacter Pipeline Error: siglip_image_encoder_model is not initialized and is None. Cannot encode SigLIP image embeddings.")
+        # --- BEGIN DEBUG PRINTS ---
+        print(f"[encode_siglip_image_emb DEBUG] Type of self.siglip_image_encoder_model: {type(self.siglip_image_encoder_model)}")
+        # --- END DEBUG PRINTS ---
+        
+        # Determine device and dtype from the model itself
+        try:
+             model_device = next(self.siglip_image_encoder_model.parameters()).device
+             model_dtype = next(self.siglip_image_encoder_model.parameters()).dtype
+        except StopIteration:
+             print("[encode_siglip_image_emb WARNING] siglip_image_encoder_model has no parameters. Using input device/dtype.")
+             model_device = device # Use device passed into method as fallback
+             model_dtype = dtype  # Use dtype passed into method as fallback
 
-        # Ensure the underlying vision model exists
+        # Call self.siglip_image_encoder_model DIRECTLY
+        print(f"[encode_siglip_image_emb DEBUG] Calling self.siglip_image_encoder_model ({type(self.siglip_image_encoder_model)}) directly with output_hidden_states=True...")
+        # Ensure the underlying vision model exists first
         if not hasattr(self.siglip_image_encoder_model, 'vision_model') or self.siglip_image_encoder_model.vision_model is None:
             raise AttributeError("Could not find the underlying vision model (expected attribute 'vision_model') on the siglip_image_encoder_model.")
-            
         underlying_vision_model = self.siglip_image_encoder_model.vision_model
         
-        # Call the UNDERLYING model with output_hidden_states=True
-        # Move pixel values to the correct device/dtype expected by the model
-        model_device = next(underlying_vision_model.parameters()).device # Get model's device
-        model_dtype = next(underlying_vision_model.parameters()).dtype  # Get model's dtype
-        
+        # Call the UNDERLYING model
+        print(f"[encode_siglip_image_emb DEBUG] Calling underlying_vision_model ({type(underlying_vision_model)}) with output_hidden_states=True...")
         res = underlying_vision_model(
-            pixel_values=siglip_pixel_values.to(device=model_device, dtype=model_dtype), 
+            pixel_values=siglip_pixel_values.to(device=model_device, dtype=model_dtype),
             output_hidden_states=True
         )
+        print(f"[encode_siglip_image_emb DEBUG] Call returned object of type: {type(res)}")
+        print(f"[encode_siglip_image_emb DEBUG] Call returned object of type: {type(res)}")
         
         # Check if output has expected attributes
         if not hasattr(res, 'last_hidden_state') or not hasattr(res, 'hidden_states'):
@@ -299,19 +308,22 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
         siglip_image_embeds = res.last_hidden_state
         
         # Extract specific intermediate hidden states
-        # Ensure hidden_states is a tuple/list and indices are valid
         hidden_states = res.hidden_states
-        required_indices = [7, 13, 26] # Example indices
-        if not isinstance(hidden_states, (list, tuple)) or not all(isinstance(idx, int) and 0 <= idx < len(hidden_states) for idx in required_indices):
-             raise IndexError(f"Cannot access required hidden state indices {required_indices}. Available hidden states length: {len(hidden_states) if isinstance(hidden_states, (list, tuple)) else 'N/A'}")
+        required_indices = [7, 13, 26] # Example indices from original code
+        
+        # Check hidden_states type and length before indexing
+        if not isinstance(hidden_states, (list, tuple)):
+             raise TypeError(f"Expected hidden_states to be a list or tuple, but got {type(hidden_states)}")
+        if not all(isinstance(idx, int) and 0 <= idx < len(hidden_states) for idx in required_indices):
+             raise IndexError(f"Cannot access required hidden state indices {required_indices}. Available hidden states length: {len(hidden_states)}")
              
         siglip_image_shallow_embeds = torch.cat([hidden_states[i] for i in required_indices], dim=1)
         
-        # Handle pooled output if needed (check if attribute exists)
+        # Handle pooled output if needed
         siglip_pooled_output = getattr(res, 'pooler_output', None) 
 
-        # Return the necessary outputs (adjust based on what encode_image_emb needs)
-        # Example: returning a tuple consistent with previous attempts
+        # Return the necessary outputs (adjust based on caller needs)
+        # Assuming the caller encode_image_emb needs these three:
         return siglip_image_embeds, siglip_pooled_output, siglip_image_shallow_embeds
 
     @torch.inference_mode()
