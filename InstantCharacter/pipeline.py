@@ -77,21 +77,23 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
         # Text encoders, tokenizers, and scheduler are expected to be part of flux_unet_model_object
         # or need to be passed separately if not.
         # For FLUX, there are typically two text encoders.
-        if hasattr(flux_unet_model_object, 'text_encoder_one') and hasattr(flux_unet_model_object, 'tokenizer_one'):
-            self.text_encoder = flux_unet_model_object.text_encoder_one
-            self.tokenizer = flux_unet_model_object.tokenizer_one
+        # Ensure attribute names are text_encoder_1, tokenizer_1, text_encoder_2, tokenizer_2
+        if hasattr(flux_unet_model_object, 'text_encoder_1') and hasattr(flux_unet_model_object, 'tokenizer_1'):
+            self.text_encoder_1 = flux_unet_model_object.text_encoder_1
+            self.tokenizer_1 = flux_unet_model_object.tokenizer_1
+            print("InstantCharacterPipeline: Assigned self.text_encoder_1 and self.tokenizer_1.")
         else:
             # Fallback or error if not found, as these are crucial for prompt encoding
-            # This part depends heavily on how the ComfyUI MODEL object for FLUX is structured
-            print("Warning: Text Encoder One / Tokenizer One not found directly on flux_unet_model_object.")
-            self.text_encoder = None # Placeholder, will cause issues if not properly set
-            self.tokenizer = None  # Placeholder
+            print("Warning: Text Encoder One (text_encoder_1) / Tokenizer One (tokenizer_1) not found directly on flux_unet_model_object.")
+            self.text_encoder_1 = None # Placeholder, will cause issues if not properly set
+            self.tokenizer_1 = None  # Placeholder
 
-        if hasattr(flux_unet_model_object, 'text_encoder_two') and hasattr(flux_unet_model_object, 'tokenizer_two'):
-            self.text_encoder_2 = flux_unet_model_object.text_encoder_two
-            self.tokenizer_2 = flux_unet_model_object.tokenizer_two
+        if hasattr(flux_unet_model_object, 'text_encoder_2') and hasattr(flux_unet_model_object, 'tokenizer_2'):
+            self.text_encoder_2 = flux_unet_model_object.text_encoder_2
+            self.tokenizer_2 = flux_unet_model_object.tokenizer_2
+            print("InstantCharacterPipeline: Assigned self.text_encoder_2 and self.tokenizer_2.")
         else:
-            print("Warning: Text Encoder Two / Tokenizer Two not found directly on flux_unet_model_object.")
+            print("Warning: Text Encoder Two (text_encoder_2) / Tokenizer Two (tokenizer_2) not found directly on flux_unet_model_object.")
             self.text_encoder_2 = None # Placeholder
             self.tokenizer_2 = None    # Placeholder
 
@@ -310,15 +312,28 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
         max_sequence_length: int,
         # Other params like do_classifier_free_guidance, negative_prompt etc. are handled by __call__ logic
     ):
-        if self.tokenizer is None or self.text_encoder is None or \
-           self.tokenizer_2 is None or self.text_encoder_2 is None:
-            raise ValueError("Tokenizers and Text Encoders must be initialized.")
+        missing_components = []
+        if not self.tokenizer_1:
+            missing_components.append("Tokenizer One (self.tokenizer_1)")
+        if not self.text_encoder_1:
+            missing_components.append("Text Encoder One (self.text_encoder_1)")
+        if not self.tokenizer_2: # Now mandatory again
+            missing_components.append("Tokenizer Two (self.tokenizer_2)")
+        if not self.text_encoder_2: # Now mandatory again
+            missing_components.append("Text Encoder Two (self.text_encoder_2)")
+        
+        if missing_components:
+            raise ValueError(
+                f"The following MANDATORY text processing components are missing or not initialized: {', '.join(missing_components)}. "
+                "Please ensure a valid and fully loaded composite FLUX CLIP model (providing both clip_l and t5xxl components with their respective tokenizers and text encoders) "
+                "is connected to the flux_text_encoder_one input of the InstantCharacterLoader node."
+            )
 
         if prompt_2 is None:
             prompt_2 = prompt
 
         # Tokenize and encode with first text encoder (e.g., CLIP L for FLUX)
-        text_inputs_one = self.tokenizer(
+        text_inputs_one = self.tokenizer_1(
             prompt,
             padding="max_length",
             max_length=max_sequence_length, # self.tokenizer.model_max_length often 77 for CLIP
@@ -326,22 +341,26 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
             return_tensors="pt",
         )
         text_ids_one = text_inputs_one.input_ids
-        untruncated_ids = self.tokenizer(prompt, padding="longest", return_tensors="pt").input_ids
+        untruncated_ids = self.tokenizer_1(prompt, padding="longest", return_tensors="pt").input_ids
         if untruncated_ids.shape[-1] >= text_ids_one.shape[-1] and not torch.equal(text_ids_one, untruncated_ids):
-            removed_text = self.tokenizer.batch_decode(untruncated_ids[:, self.tokenizer.model_max_length - 1 : -1])
-            print(f"Warning: The following part of your input was truncated because CLIP can only handle sequences up to {self.tokenizer.model_max_length} tokens: {removed_text}")
+            removed_text = self.tokenizer_1.batch_decode(untruncated_ids[:, self.tokenizer_1.model_max_length - 1 : -1])
+            print(f"Warning: The following part of your input was truncated because CLIP can only handle sequences up to {self.tokenizer_1.model_max_length} tokens: {removed_text}")
         
-        prompt_embeds_one = self.text_encoder(text_ids_one.to(device), output_hidden_states=True)
+        prompt_embeds_one_output = self.text_encoder_1(text_ids_one.to(device), output_hidden_states=True)
         # FLUX might use specific hidden states or pooled output, this is a general CLIP approach
-        # pooled_prompt_embeds_one = prompt_embeds_one.pooled_output
-        prompt_embeds_one = prompt_embeds_one.last_hidden_state
+        # pooled_prompt_embeds_one = prompt_embeds_one_output.pooled_output # Typically not used from first encoder in FLUX
+        prompt_embeds_one = prompt_embeds_one_output.last_hidden_state
 
+        # Initialize outputs from the second text encoder
+        prompt_embeds_two = None
+        pooled_prompt_embeds = None
+        text_ids_two = None
 
-        # Tokenize and encode with second text encoder (e.g., CLIP G or T5-xxl for FLUX)
+        # Tokenize and encode with second text encoder (MANDATORY)
         text_inputs_two = self.tokenizer_2(
             prompt_2,
             padding="max_length",
-            max_length=max_sequence_length, # self.tokenizer_2.model_max_length (e.g. 256 or 512 for T5)
+            max_length=max_sequence_length,
             truncation=True,
             return_tensors="pt",
         )
@@ -351,35 +370,48 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
             removed_text_two = self.tokenizer_2.batch_decode(untruncated_ids_two[:, self.tokenizer_2.model_max_length - 1 : -1])
             print(f"Warning: The following part of your input was truncated because Text Encoder 2 can only handle sequences up to {self.tokenizer_2.model_max_length} tokens: {removed_text_two}")
 
-        prompt_embeds_two = self.text_encoder_2(text_ids_two.to(device), output_hidden_states=True)
-        # FLUX uses specific outputs from its text encoders.
-        # For FLUX.1-dev, text_encoder_2 (CLIP-G based) provides pooled_output and last_hidden_state
-        # The `pooled_prompt_embeds` for FLUX usually comes from text_encoder_2
-        pooled_prompt_embeds = prompt_embeds_two.pooled_output # This is typical for FLUX
-        prompt_embeds_two = prompt_embeds_two.last_hidden_state
+        prompt_embeds_two_output = self.text_encoder_2(text_ids_two.to(device), output_hidden_states=True)
+        prompt_embeds_two = prompt_embeds_two_output.last_hidden_state
+        
+        # Pooled output typically comes from the second (often larger) text encoder in FLUX
+        if hasattr(prompt_embeds_two_output, 'pooled_output'):
+            pooled_prompt_embeds = prompt_embeds_two_output.pooled_output
+        else:
+            # Fallback or warning if pooled_output is expected but not found
+            print("Warning: Text Encoder 2 output does not have 'pooled_output'. Pooled embeddings will be None.")
+            # If T5XXL is mandatory, its pooled output is usually expected. Consider raising an error or ensuring it's always present.
+            # For now, allowing None to match previous logic if attribute is missing, but the check at start of function makes text_encoder_2 mandatory.
 
-        # Concatenate or combine embeddings as FLUX expects
-        # FLUX.1-dev concatenates the hidden states from both encoders
+        # Combine embeddings
         prompt_embeds = torch.cat((prompt_embeds_one, prompt_embeds_two), dim=-1)
         
         # Duplicate embeddings for each image per prompt
-        bs_embed, seq_len, _ = prompt_embeds.shape
+        bs_embed, seq_len, _ = prompt_embeds.shape # bs_embed is the original batch size
         prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
         prompt_embeds = prompt_embeds.view(bs_embed * num_images_per_prompt, seq_len, -1)
+
+        # Duplicate pooled embeddings
+        # pooled_prompt_embeds should not be None if text_encoder_2 is mandatory and provides it.
+        if pooled_prompt_embeds is None:
+             # This case should ideally not be hit if T5XXL (text_encoder_2) always provides pooled_output
+            print("Critical Warning: pooled_prompt_embeds is None despite text_encoder_2 being mandatory. This may lead to errors.")
+            # Create a zero tensor as a fallback to prevent downstream errors, though this indicates an issue.
+            # The shape of pooled_prompt_embeds depends on the text_encoder_2's config.
+            # Assuming text_encoder_2.config.hidden_size if available, else a common large dim.
+            pooled_dim = getattr(self.text_encoder_2.config, 'hidden_size', 4096)
+            pooled_prompt_embeds = torch.zeros(bs_embed, pooled_dim, device=device, dtype=self.dtype)
+
 
         bs_embed_pooled, _ = pooled_prompt_embeds.shape
         pooled_prompt_embeds = pooled_prompt_embeds.repeat(1, num_images_per_prompt)
         pooled_prompt_embeds = pooled_prompt_embeds.view(bs_embed_pooled * num_images_per_prompt, -1)
         
-        # For FLUX, text_ids are also passed to the transformer. Usually from the larger text encoder.
-        # This needs to match what the FLUX transformer expects.
-        # Let's assume text_ids_two are used, or a combined version if necessary.
+        # Prepare text_ids for the transformer - always use text_ids_two as it's mandatory
         text_ids_for_transformer = text_ids_two.repeat(1, num_images_per_prompt).view(bs_embed * num_images_per_prompt, -1)
-
 
         return prompt_embeds.to(device=device, dtype=self.dtype), \
                pooled_prompt_embeds.to(device=device, dtype=self.dtype), \
-               text_ids_for_transformer.to(device=device) # Or appropriate text_ids for FLUX transformer
+               text_ids_for_transformer.to(device=device)
 
     # prepare_latents method (simplified, from Diffusers)
     def prepare_latents(self, batch_size, num_channels_latents, height, width, dtype, device, generator, latents=None):
