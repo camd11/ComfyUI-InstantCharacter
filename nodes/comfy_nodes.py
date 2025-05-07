@@ -28,6 +28,7 @@ class InstantCharacterLoader:
                 "siglip_vision_model": ("CLIP_VISION", {}),
                 "dinov2_vision_model": ("CLIP_VISION", {}),
                 "ipadapter_model_data": ("IPADAPTER", {}),
+                "sampler": ("SAMPLER", ), # Added SAMPLER input
                 "cpu_offload": ("BOOLEAN", {"default": False}),
             },
         }
@@ -44,6 +45,7 @@ class InstantCharacterLoader:
                               siglip_vision_model,
                               dinov2_vision_model,
                               ipadapter_model_data,
+                              sampler, # Added sampler argument
                               cpu_offload,
                              ):
 
@@ -109,7 +111,8 @@ class InstantCharacterLoader:
             vae_module=actual_vae,
             siglip_vision_model_object=siglip_vision_model,
             dinov2_vision_model_object=dinov2_vision_model,
-            ipadapter_model_data_dict=ipadapter_model_data
+            ipadapter_model_data_dict=ipadapter_model_data,
+            sampler_object=sampler # Pass sampler to pipeline
             # dtype is handled by the pipeline's __init__
         )
 

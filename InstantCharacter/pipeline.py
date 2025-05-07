@@ -60,6 +60,7 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
                  siglip_vision_model_object,  # ComfyUI CLIP_VISION object for SigLIP
                  dinov2_vision_model_object,  # ComfyUI CLIP_VISION object for DINOv2
                  ipadapter_model_data_dict,   # Dict of IPAdapter weights
+                 sampler_object,              # ComfyUI SAMPLER object
                  dtype=torch.bfloat16):
         """
         Initializes the InstantCharacterFluxPipeline with pre-loaded model components.
@@ -99,14 +100,11 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
             self.text_encoder_2 = None # Placeholder
             self.tokenizer_2 = None    # Placeholder
 
-        if hasattr(flux_unet_model_object, 'scheduler'):
-            self.scheduler = flux_unet_model_object.scheduler
-        else:
-            # Fallback: try to get config and initialize a scheduler
-            # from diffusers.schedulers import FluxScheduler # Example
-            # self.scheduler = FluxScheduler.from_config(flux_unet_model_object.model_config.scheduler)
-            print("Warning: Scheduler not found directly on flux_unet_model_object. Needs manual setup or to be included in MODEL.")
-            self.scheduler = None # Placeholder
+        self.scheduler = sampler_object # Assign sampler from input
+        if self.scheduler is None:
+            # This should ideally be caught by ComfyUI if SAMPLER is a required input
+            raise ValueError("A sampler_object must be provided to InstantCharacterFluxPipeline.")
+        print("InstantCharacterPipeline: Assigned self.scheduler from sampler_object.")
 
         # Assign Image Encoders from CLIP_VISION objects
         # Assign Image Encoders from CLIP_VISION objects
@@ -467,7 +465,40 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
         siglip_embeds_tuple = self.encode_siglip_image_emb(siglip_low_res_pixels, device, dtype)
         dinov2_embeds_tuple = self.encode_dinov2_image_emb(dinov2_low_res_pixels, device, dtype)
 
-        image_embeds_low_res_deep = torch.cat([siglip_embeds_tuple[0], dinov2_embeds_tuple[0]], dim=2)
+        siglip_deep_features = siglip_embeds_tuple[0]  # Shape: (B, 729, D_siglip)
+        dinov2_deep_features = dinov2_embeds_tuple[0]  # Shape: (B, 1369, D_dinov2)
+
+        # Determine spatial dimensions (assuming square patch grid)
+        B_s, seq_len_siglip, D_siglip = siglip_deep_features.shape
+        H_s = W_s = int(seq_len_siglip**0.5)  # sqrt(729) = 27
+
+        B_d, seq_len_dinov2, D_dinov2 = dinov2_deep_features.shape
+        H_d = W_d = int(seq_len_dinov2**0.5)  # sqrt(1369) = 37
+
+        if H_s * W_s != seq_len_siglip:
+            raise ValueError(f"SigLIP deep feature sequence length {seq_len_siglip} is not a perfect square for spatial reshaping.")
+        if H_d * W_d != seq_len_dinov2:
+            raise ValueError(f"DINOv2 deep feature sequence length {seq_len_dinov2} is not a perfect square for spatial reshaping.")
+
+        # Reshape SigLIP features for interpolation (B, C, H, W)
+        # (B, SeqLen, Dim) -> (B, Dim, SeqLen) -> (B, Dim, H, W)
+        siglip_deep_features_spatial = siglip_deep_features.permute(0, 2, 1).reshape(B_s, D_siglip, H_s, W_s)
+
+        # Interpolate SigLIP features to match DINOv2 spatial dimensions (target: H_d, W_d)
+        siglip_deep_features_resized_spatial = torch.nn.functional.interpolate(
+            siglip_deep_features_spatial,
+            size=(H_d, W_d),  # Target spatial dimensions (37, 37)
+            mode='bilinear',
+            align_corners=False
+        )
+
+        # Reshape interpolated SigLIP features back to (B, SeqLen, Dim)
+        # (B, Dim, H_d, W_d) -> (B, Dim, H_d*W_d) -> (B, H_d*W_d, Dim)
+        siglip_deep_features_final = siglip_deep_features_resized_spatial.reshape(B_s, D_siglip, -1).permute(0, 2, 1)
+
+        # Now siglip_deep_features_final has shape (B, 1369, D_siglip)
+        # and dinov2_deep_features has shape (B, 1369, D_dinov2)
+        image_embeds_low_res_deep = torch.cat([siglip_deep_features_final, dinov2_deep_features], dim=2)
         image_embeds_low_res_shallow = torch.cat([siglip_embeds_tuple[1], dinov2_embeds_tuple[1]], dim=2)
 
         # High-resolution processing
