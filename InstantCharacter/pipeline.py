@@ -8,6 +8,7 @@ import torch.nn as nn # Added
 import torchvision.transforms.functional as TF # Added for preprocessing
 import numpy as np # Added for __call__
 from typing import Union, List, Optional, Dict, Any, Callable # Added for __call__
+import inspect # Added for detailed debugging
 
 # Removed: from diffusers.pipelines.flux.pipeline_flux import *
 # Removed: from transformers import SiglipVisionModel, SiglipImageProcessor, AutoModel, AutoImageProcessor
@@ -275,66 +276,147 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
         print(f"[encode_siglip_image_emb DEBUG] Type of self.siglip_image_encoder_model: {type(self.siglip_image_encoder_model)}")
         # --- END DEBUG PRINTS ---
         
-        # Determine device and dtype from the model itself
+        # Determine device and dtype from the model if possible, otherwise use input
         try:
-             model_device = next(self.siglip_image_encoder_model.parameters()).device
-             model_dtype = next(self.siglip_image_encoder_model.parameters()).dtype
+            model_device = next(self.siglip_image_encoder_model.parameters()).device
+            model_dtype = next(self.siglip_image_encoder_model.parameters()).dtype
         except StopIteration:
-             print("[encode_siglip_image_emb WARNING] siglip_image_encoder_model has no parameters. Using input device/dtype.")
-             model_device = device # Use device passed into method as fallback
-             model_dtype = dtype  # Use dtype passed into method as fallback
+            print("[encode_siglip_image_emb WARNING] self.siglip_image_encoder_model has no parameters. Using input device/dtype.")
+            model_device = device
+            model_dtype = dtype
+        except AttributeError: # Should not happen if model is nn.Module
+            print("[encode_siglip_image_emb WARNING] Could not get parameters from self.siglip_image_encoder_model. Using input device/dtype.")
+            model_device = device
+            model_dtype = dtype
 
-        # Call self.siglip_image_encoder_model DIRECTLY
-        print(f"[encode_siglip_image_emb DEBUG] Calling self.siglip_image_encoder_model ({type(self.siglip_image_encoder_model)}) directly with output_hidden_states=True...")
-        # Ensure the underlying vision model exists first
-        if not hasattr(self.siglip_image_encoder_model, 'vision_model') or self.siglip_image_encoder_model.vision_model is None:
-            raise AttributeError("Could not find the underlying vision model (expected attribute 'vision_model') on the siglip_image_encoder_model.")
-        underlying_vision_model = self.siglip_image_encoder_model.vision_model
-        
-        # Call the UNDERLYING model
-        print(f"[encode_siglip_image_emb DEBUG] Calling underlying_vision_model ({type(underlying_vision_model)}) with output_hidden_states=True...")
-        res = underlying_vision_model(
-            pixel_values=siglip_pixel_values.to(device=model_device, dtype=model_dtype),
-            output_hidden_states=True
-        )
-        print(f"[encode_siglip_image_emb DEBUG] Call returned object of type: {type(res)}")
-        print(f"[encode_siglip_image_emb DEBUG] Call returned object of type: {type(res)}")
-        
-        # Check if output has expected attributes
-        if not hasattr(res, 'last_hidden_state') or not hasattr(res, 'hidden_states'):
-             raise TypeError(f"Unexpected output type from underlying vision model: {type(res)}. Expected attributes 'last_hidden_state' and 'hidden_states'.")
+        self.siglip_image_encoder_model.to(device=model_device, dtype=model_dtype) # Ensure model is on correct device/dtype
 
-        # Extract embeddings using attributes from the HF output object
-        siglip_image_embeds = res.last_hidden_state
-        
-        # Extract specific intermediate hidden states
-        hidden_states = res.hidden_states
-        required_indices = [7, 13, 26] # Example indices from original code
-        
-        # Check hidden_states type and length before indexing
-        if not isinstance(hidden_states, (list, tuple)):
-             raise TypeError(f"Expected hidden_states to be a list or tuple, but got {type(hidden_states)}")
-        if not all(isinstance(idx, int) and 0 <= idx < len(hidden_states) for idx in required_indices):
-             raise IndexError(f"Cannot access required hidden state indices {required_indices}. Available hidden states length: {len(hidden_states)}")
-             
-        siglip_image_shallow_embeds = torch.cat([hidden_states[i] for i in required_indices], dim=1)
-        
-        # Handle pooled output if needed
-        siglip_pooled_output = getattr(res, 'pooler_output', None) 
+        required_indices = [7, 13, 26]
+        intermediate_outputs = []
+        last_hidden_state = None
+        pooled_output = None
 
-        # Return the necessary outputs (adjust based on caller needs)
-        # Assuming the caller encode_image_emb needs these three:
-        return siglip_image_embeds, siglip_pooled_output, siglip_image_shallow_embeds
+        # Ensure model is on the correct device/dtype (already done before this block)
+        # self.siglip_image_encoder_model.to(device=model_device, dtype=model_dtype)
+
+        for index in required_indices:
+            print(f"[encode_siglip_image_emb DEBUG] Calling siglip_image_encoder_model for intermediate_output={index}...")
+            # The siglip_image_encoder_model is likely CLIPVisionModelProjection from ComfyUI
+            # Its forward method, when intermediate_output is specified, typically returns a tuple:
+            # (last_hidden_state_from_encoder, requested_intermediate_layer, projected_pooled_output, potentially_multimodal_projector_output)
+            # We are interested in the first three elements primarily.
+            res_tuple = self.siglip_image_encoder_model(
+                pixel_values=siglip_pixel_values.to(device=model_device, dtype=model_dtype),
+                intermediate_output=index
+            )
+            print(f"[encode_siglip_image_emb DEBUG] Call for index {index} returned tuple of type: {type(res_tuple)}, length: {len(res_tuple) if isinstance(res_tuple, tuple) else 'N/A'}")
+
+            if not isinstance(res_tuple, tuple) or len(res_tuple) < 2: # Need at least last_hidden_state and intermediate_output
+                raise ValueError(
+                    f"Unexpected output tuple structure for intermediate_output={index}. "
+                    f"Expected at least 2 elements, got {len(res_tuple) if isinstance(res_tuple, tuple) else type(res_tuple)}"
+                )
+
+            # Intermediate output is typically the second element
+            intermediate_outputs.append(res_tuple[1])
+
+            # Capture final outputs from the last iteration (or any, they should be consistent from the encoder itself)
+            # The projected_pooled_output might change if the projection depends on the intermediate layer,
+            # but last_hidden_state from the vision_model part should be the same.
+            # Let's take them from the last specified index call for consistency.
+            if index == required_indices[-1]:
+                last_hidden_state = res_tuple[0]
+                if len(res_tuple) >= 3:
+                    pooled_output = res_tuple[2] # Projected pooled output
+                else:
+                    # This case might occur if the tuple structure is shorter than expected (e.g. no multimodal projector output)
+                    # or if the pooled output is not the third element.
+                    # For safety, one might make a separate call without intermediate_output if pooled_output is critical and missing.
+                    # However, ComfyUI's CLIPVisionModelProjection usually provides it.
+                    print(f"[encode_siglip_image_emb WARNING] Pooled output (res_tuple[2]) not found for index {index}. Length: {len(res_tuple)}. Setting to None.")
+                    pooled_output = None
+
+
+        if not intermediate_outputs or len(intermediate_outputs) != len(required_indices):
+            raise RuntimeError(f"Failed to retrieve all required intermediate hidden states. Expected {len(required_indices)}, got {len(intermediate_outputs)}.")
+        if last_hidden_state is None:
+            # This could happen if required_indices is empty or loop logic fails
+            raise RuntimeError("Failed to retrieve last_hidden_state from SigLIP model.")
+        # pooled_output can be None if not found, handle accordingly in consuming code if critical
+
+        # Combine shallow embeddings
+        # Assuming intermediate outputs are [Batch, SeqLen, Dim_layer], concatenate along feature dim
+        siglip_image_shallow_embeds = torch.cat(intermediate_outputs, dim=-1)
+
+        siglip_image_embeds = last_hidden_state
+        # pooled_output is already set
+
+        if siglip_image_embeds is None: # Redundant check if previous one passes, but good for safety
+            raise ValueError("SigLIP last_hidden_state (siglip_image_embeds) is None after processing.")
+        if siglip_image_shallow_embeds is None:
+             raise ValueError("Combined siglip_image_shallow_embeds is None after processing.")
+        # siglip_pooled_output can be None, so no strict check here unless always required
+
+        return siglip_image_embeds, pooled_output, siglip_image_shallow_embeds
 
     @torch.inference_mode()
     def encode_dinov2_image_emb(self, dinov2_pixel_values, device, dtype):
         # dinov2_pixel_values are preprocessed tensors.
-        self.dinov2_image_encoder_model.to(device, dtype=dtype)
-        # dinov2_pixel_values already moved to device by _comfy_clip_vision_preprocess_pil
-        res = self.dinov2_image_encoder_model(dinov2_pixel_values, output_hidden_states=True)
-        # Verify hidden state indices [9, 19, 29] for the specific DINOv2 model
-        dinov2_image_embeds = res.last_hidden_state[:, 1:] # Exclude CLS token
-        dinov2_image_shallow_embeds = torch.cat([res.hidden_states[i][:, 1:] for i in [9, 19, 29]], dim=1)
+        
+        # Determine device and dtype from the model if possible, otherwise use input
+        try:
+            model_device = next(self.dinov2_image_encoder_model.parameters()).device
+            model_dtype = next(self.dinov2_image_encoder_model.parameters()).dtype
+        except StopIteration:
+            print("[encode_dinov2_image_emb WARNING] self.dinov2_image_encoder_model has no parameters. Using input device/dtype.")
+            model_device = device
+            model_dtype = dtype
+        except AttributeError:
+            print("[encode_dinov2_image_emb WARNING] Could not get parameters from self.dinov2_image_encoder_model. Using input device/dtype.")
+            model_device = device
+            model_dtype = dtype
+
+        self.dinov2_image_encoder_model.to(device=model_device, dtype=model_dtype)
+        
+        required_indices = [9, 19, 29] # Specific layers for DINOv2
+        dinov2_intermediate_layers = []
+        dinov2_image_embeds = None # Will be set from the first call
+
+        for i, layer_idx in enumerate(required_indices):
+            print(f"[encode_dinov2_image_emb DEBUG] Calling self.dinov2_image_encoder_model ({type(self.dinov2_image_encoder_model)}) with intermediate_output={layer_idx}...")
+            comfy_output = self.dinov2_image_encoder_model(
+                pixel_values=dinov2_pixel_values.to(device=model_device, dtype=model_dtype),
+                intermediate_output=layer_idx
+            )
+
+            if not isinstance(comfy_output, tuple) or len(comfy_output) < 2: # Need at least last_hidden_state and intermediate_output
+                raise TypeError(f"Unexpected output type from dinov2_image_encoder_model for layer {layer_idx}: {type(comfy_output)}. Expected a tuple of at least 2 elements.")
+
+            if i == 0: # Get last_hidden_state from the first call
+                dinov2_image_embeds = comfy_output[0]
+                if dinov2_image_embeds is None:
+                    raise ValueError(f"Failed to retrieve last_hidden_state from DINOv2 model output for layer {layer_idx}.")
+                # DINOv2 typically excludes CLS token for image features
+                if dinov2_image_embeds.shape[1] > 1: # Check if there's more than one token (CLS + patches)
+                    dinov2_image_embeds = dinov2_image_embeds[:, 1:]
+
+
+            intermediate_layer = comfy_output[1]
+            if intermediate_layer is None:
+                raise ValueError(f"Failed to retrieve intermediate layer {layer_idx} from DINOv2 model output.")
+            # DINOv2 typically excludes CLS token for image features
+            if intermediate_layer.shape[1] > 1: # Check if there's more than one token
+                 intermediate_layer = intermediate_layer[:, 1:]
+            dinov2_intermediate_layers.append(intermediate_layer)
+
+        if not dinov2_intermediate_layers:
+            raise ValueError("No intermediate layers were extracted for DINOv2.")
+            
+        dinov2_image_shallow_embeds = torch.cat(dinov2_intermediate_layers, dim=1)
+        
+        if dinov2_image_embeds is None:
+             raise ValueError("dinov2_image_embeds (last_hidden_state) was not properly set.")
+
         return dinov2_image_embeds, dinov2_image_shallow_embeds
 
     @torch.inference_mode()
