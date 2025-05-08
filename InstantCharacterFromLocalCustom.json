@@ -1,145 +1,9 @@
 {
   "id": "f0423af0-cf5a-426f-9f33-0a7fc911e831",
   "revision": 0,
-  "last_node_id": 33,
-  "last_link_id": 23,
+  "last_node_id": 35,
+  "last_link_id": 31,
   "nodes": [
-    {
-      "id": 28,
-      "type": "IPAdapterModelLoader",
-      "pos": [
-        -916.9083251953125,
-        509.044189453125
-      ],
-      "size": [
-        315,
-        58
-      ],
-      "flags": {},
-      "order": 0,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "IPADAPTER",
-          "type": "IPADAPTER",
-          "links": [
-            17
-          ]
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfyui_ipadapter_plus",
-        "ver": "2.0.0",
-        "Node name for S&R": "IPAdapterModelLoader",
-        "widget_ue_connectable": {}
-      },
-      "widgets_values": [
-        "instantcharacter_ip-adapter.bin"
-      ]
-    },
-    {
-      "id": 27,
-      "type": "CLIPVisionLoader",
-      "pos": [
-        -918.263916015625,
-        400.728515625
-      ],
-      "size": [
-        315,
-        58
-      ],
-      "flags": {},
-      "order": 1,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "CLIP_VISION",
-          "type": "CLIP_VISION",
-          "links": [
-            16
-          ]
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfy-core",
-        "ver": "0.3.31",
-        "Node name for S&R": "CLIPVisionLoader",
-        "widget_ue_connectable": {}
-      },
-      "widgets_values": [
-        "dinov2-giant/model.safetensors"
-      ]
-    },
-    {
-      "id": 26,
-      "type": "CLIPVisionLoader",
-      "pos": [
-        -920.330322265625,
-        302.79461669921875
-      ],
-      "size": [
-        315,
-        58
-      ],
-      "flags": {},
-      "order": 2,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "CLIP_VISION",
-          "type": "CLIP_VISION",
-          "links": [
-            15
-          ]
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfy-core",
-        "ver": "0.3.31",
-        "Node name for S&R": "CLIPVisionLoader",
-        "widget_ue_connectable": {}
-      },
-      "widgets_values": [
-        "siglip-so400m-patch14-384/model.safetensors"
-      ]
-    },
-    {
-      "id": 30,
-      "type": "VAELoader",
-      "pos": [
-        -909.059326171875,
-        210.42738342285156
-      ],
-      "size": [
-        315,
-        58
-      ],
-      "flags": {},
-      "order": 3,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "VAE",
-          "type": "VAE",
-          "links": [
-            20
-          ]
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfy-core",
-        "ver": "0.3.31",
-        "Node name for S&R": "VAELoader",
-        "widget_ue_connectable": {}
-      },
-      "widgets_values": [
-        "ae.safetensors"
-      ]
-    },
     {
       "id": 24,
       "type": "InstantCharacterGenerate",
@@ -152,13 +16,13 @@
         330
       ],
       "flags": {},
-      "order": 9,
+      "order": 7,
       "mode": 0,
       "inputs": [
         {
           "name": "pipe",
           "type": "INSTANTCHAR_PIPE",
-          "link": 14
+          "link": 31
         },
         {
           "name": "subject_image",
@@ -206,7 +70,7 @@
         270
       ],
       "flags": {},
-      "order": 10,
+      "order": 8,
       "mode": 0,
       "inputs": [
         {
@@ -238,7 +102,7 @@
         314
       ],
       "flags": {},
-      "order": 4,
+      "order": 0,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -267,40 +131,6 @@
       ]
     },
     {
-      "id": 18,
-      "type": "UnetLoaderGGUF",
-      "pos": [
-        -941.3375244140625,
-        -196.45782470703125
-      ],
-      "size": [
-        315,
-        58
-      ],
-      "flags": {},
-      "order": 5,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "MODEL",
-          "type": "MODEL",
-          "links": [
-            13
-          ]
-        }
-      ],
-      "properties": {
-        "cnr_id": "ComfyUI-GGUF",
-        "ver": "3d673c5c098ecaa6e6027f834659ba8de534ca32",
-        "Node name for S&R": "UnetLoaderGGUF",
-        "widget_ue_connectable": {}
-      },
-      "widgets_values": [
-        "flux1-dev-Q4_K_S.gguf"
-      ]
-    },
-    {
       "id": 29,
       "type": "DualCLIPLoader",
       "pos": [
@@ -312,7 +142,7 @@
         130
       ],
       "flags": {},
-      "order": 6,
+      "order": 1,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -320,8 +150,8 @@
           "name": "CLIP",
           "type": "CLIP",
           "links": [
-            18,
-            19
+            26,
+            27
           ]
         }
       ],
@@ -339,93 +169,52 @@
       ]
     },
     {
-      "id": 25,
-      "type": "InstantCharacterLoader",
+      "id": 30,
+      "type": "VAELoader",
       "pos": [
-        -504.1861877441406,
-        -98.45269012451172
-      ],
-      "size": [
-        468.5999755859375,
-        198
-      ],
-      "flags": {},
-      "order": 8,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "flux_unet_model",
-          "type": "MODEL",
-          "link": 13
-        },
-        {
-          "name": "flux_text_encoder_one",
-          "type": "CLIP",
-          "link": 18
-        },
-        {
-          "name": "flux_vae",
-          "type": "VAE",
-          "link": 20
-        },
-        {
-          "name": "siglip_vision_model",
-          "type": "CLIP_VISION",
-          "link": 15
-        },
-        {
-          "name": "dinov2_vision_model",
-          "type": "CLIP_VISION",
-          "link": 16
-        },
-        {
-          "name": "ipadapter_model_data",
-          "type": "IPADAPTER",
-          "link": 17
-        },
-        {
-          "name": "sampler",
-          "type": "SAMPLER",
-          "link": 23
-        },
-        {
-          "name": "flux_text_encoder_two",
-          "type": "CLIP",
-          "link": 19
-        }
-      ],
-      "outputs": [
-        {
-          "name": "INSTANTCHAR_PIPE",
-          "type": "INSTANTCHAR_PIPE",
-          "links": [
-            14
-          ]
-        }
-      ],
-      "properties": {
-        "aux_id": "jax-explorer/ComfyUI-InstantCharacter",
-        "ver": "8f39b84d92fd3d62d2bbac3c1d9252d343f9d192",
-        "Node name for S&R": "InstantCharacterLoader",
-        "widget_ue_connectable": {}
-      },
-      "widgets_values": [
-        false
-      ]
-    },
-    {
-      "id": 33,
-      "type": "KSamplerSelect",
-      "pos": [
-        -949.43994140625,
-        72.130615234375
+        -947.9022216796875,
+        63.319908142089844
       ],
       "size": [
         315,
         58
       ],
       "flags": {},
-      "order": 7,
+      "order": 2,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "links": [
+            28
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.31",
+        "Node name for S&R": "VAELoader",
+        "widget_ue_connectable": {}
+      },
+      "widgets_values": [
+        "ae.safetensors"
+      ]
+    },
+    {
+      "id": 33,
+      "type": "KSamplerSelect",
+      "pos": [
+        -943.6551513671875,
+        264.692626953125
+      ],
+      "size": [
+        315,
+        58
+      ],
+      "flags": {},
+      "order": 3,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -433,7 +222,7 @@
           "name": "SAMPLER",
           "type": "SAMPLER",
           "links": [
-            23
+            30
           ]
         }
       ],
@@ -445,6 +234,141 @@
       },
       "widgets_values": [
         "euler_ancestral"
+      ]
+    },
+    {
+      "id": 28,
+      "type": "IPAdapterModelLoader",
+      "pos": [
+        -945.0075073242188,
+        161.9366455078125
+      ],
+      "size": [
+        315,
+        58
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "IPADAPTER",
+          "type": "IPADAPTER",
+          "links": [
+            29
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfyui_ipadapter_plus",
+        "ver": "2.0.0",
+        "Node name for S&R": "IPAdapterModelLoader",
+        "widget_ue_connectable": {}
+      },
+      "widgets_values": [
+        "instantcharacter_ip-adapter.bin"
+      ]
+    },
+    {
+      "id": 34,
+      "type": "InstantCharacterLoader",
+      "pos": [
+        -563.8853149414062,
+        -79.47262573242188
+      ],
+      "size": [
+        531.5999755859375,
+        206
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "flux_unet_model",
+          "type": "MODEL",
+          "link": 24
+        },
+        {
+          "name": "flux_text_encoder_one",
+          "type": "CLIP",
+          "link": 26
+        },
+        {
+          "name": "flux_text_encoder_two",
+          "type": "CLIP",
+          "link": 27
+        },
+        {
+          "name": "flux_vae",
+          "type": "VAE",
+          "link": 28
+        },
+        {
+          "name": "ipadapter_model_data",
+          "type": "IPADAPTER",
+          "link": 29
+        },
+        {
+          "name": "sampler",
+          "type": "SAMPLER",
+          "link": 30
+        }
+      ],
+      "outputs": [
+        {
+          "name": "INSTANTCHAR_PIPE",
+          "type": "INSTANTCHAR_PIPE",
+          "links": [
+            31
+          ]
+        }
+      ],
+      "properties": {
+        "aux_id": "jax-explorer/ComfyUI-InstantCharacter",
+        "ver": "8f39b84d92fd3d62d2bbac3c1d9252d343f9d192",
+        "Node name for S&R": "InstantCharacterLoader",
+        "widget_ue_connectable": {}
+      },
+      "widgets_values": [
+        "/home/ryan/ComfyUI2025/ComfyUI/models/clip_vision/siglip-so400m-patch14-384/model.safetensors",
+        "/home/ryan/ComfyUI2025/ComfyUI/models/clip_vision/dinov2-giant/model.safetensors",
+        false
+      ]
+    },
+    {
+      "id": 18,
+      "type": "UnetLoaderGGUF",
+      "pos": [
+        -955.883056640625,
+        -206.4578094482422
+      ],
+      "size": [
+        315,
+        58
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            24
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "ComfyUI-GGUF",
+        "ver": "3d673c5c098ecaa6e6027f834659ba8de534ca32",
+        "Node name for S&R": "UnetLoaderGGUF",
+        "widget_ue_connectable": {}
+      },
+      "widgets_values": [
+        "flux1-dev-Q4_K_S.gguf"
       ]
     }
   ],
@@ -466,86 +390,70 @@
       "IMAGE"
     ],
     [
-      13,
+      24,
       18,
       0,
-      25,
+      34,
       0,
       "MODEL"
     ],
     [
-      14,
-      25,
-      0,
-      24,
-      0,
-      "INSTANTCHAR_PIPE"
-    ],
-    [
-      15,
       26,
-      0,
-      25,
-      3,
-      "CLIP_VISION"
-    ],
-    [
-      16,
-      27,
-      0,
-      25,
-      4,
-      "CLIP_VISION"
-    ],
-    [
-      17,
-      28,
-      0,
-      25,
-      5,
-      "IPADAPTER"
-    ],
-    [
-      18,
       29,
       0,
-      25,
+      34,
       1,
       "CLIP"
     ],
     [
-      19,
+      27,
       29,
       0,
-      25,
-      7,
+      34,
+      2,
       "CLIP"
     ],
     [
-      20,
+      28,
       30,
       0,
-      25,
-      2,
+      34,
+      3,
       "VAE"
     ],
     [
-      23,
+      29,
+      28,
+      0,
+      34,
+      4,
+      "IPADAPTER"
+    ],
+    [
+      30,
       33,
       0,
-      25,
-      6,
+      34,
+      5,
       "SAMPLER"
+    ],
+    [
+      31,
+      34,
+      0,
+      24,
+      0,
+      "INSTANTCHAR_PIPE"
     ]
   ],
   "groups": [],
   "config": {},
   "extra": {
     "ds": {
-      "scale": 1,
+      "scale": 1.1,
       "offset": [
-        1185.4399199868953,
-        275.86938793054475
+        1035.3738042844166,
+        254.6793052859162
       ]
     },
     "ue_links": [],
