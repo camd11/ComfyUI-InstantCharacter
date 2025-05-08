@@ -270,185 +270,145 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
 
     @torch.inference_mode()
     def encode_siglip_image_emb(self, siglip_pixel_values, device, dtype):
-        # --- BEGIN DEBUG PRINTS ---
-        print(f"[encode_siglip_image_emb DEBUG] Type of self.siglip_image_encoder_model: {type(self.siglip_image_encoder_model)}")
-        # --- END DEBUG PRINTS ---
+        if self.siglip_image_encoder_model is None:
+            raise ValueError("SigLIP image encoder model is not initialized.")
         
-        # Determine device and dtype from the model if possible, otherwise use input
+        clip_vision_object = self.siglip_image_encoder_model.vision_model # This is comfy.clip_model.CLIPVision
         try:
-            model_device = next(self.siglip_image_encoder_model.parameters()).device
-            model_dtype = next(self.siglip_image_encoder_model.parameters()).dtype
+            # Get device/dtype from the underlying HF model wrapped by CLIPVision
+            model_device = next(clip_vision_object.vision_model.parameters()).device
+            model_dtype = next(clip_vision_object.vision_model.parameters()).dtype
+            model_dtype = next(encoder_model_to_use.parameters()).dtype
         except StopIteration:
-            print("[encode_siglip_image_emb WARNING] self.siglip_image_encoder_model has no parameters. Using input device/dtype.")
-            model_device = device
-            model_dtype = dtype
-        except AttributeError: # Should not happen if model is nn.Module
-            print("[encode_siglip_image_emb WARNING] Could not get parameters from self.siglip_image_encoder_model. Using input device/dtype.")
-            model_device = device
-            model_dtype = dtype
-
-        self.siglip_image_encoder_model.to(device=model_device, dtype=model_dtype) # Ensure model is on correct device/dtype
-
-        required_indices = [7, 13, 26]
-        intermediate_outputs = []
-        last_hidden_state = None
-        pooled_output = None
-
-        # Ensure model is on the correct device/dtype (already done before this block)
-        # self.siglip_image_encoder_model.to(device=model_device, dtype=model_dtype)
-
-        for index in required_indices:
-            print(f"[encode_siglip_image_emb DEBUG] Calling siglip_image_encoder_model for intermediate_output={index}...")
-            # The siglip_image_encoder_model is likely CLIPVisionModelProjection from ComfyUI
-            # Its forward method, when intermediate_output is specified, typically returns a tuple:
-            # (last_hidden_state_from_encoder, requested_intermediate_layer, projected_pooled_output, potentially_multimodal_projector_output)
-            # We are interested in the first three elements primarily.
-            res_tuple = self.siglip_image_encoder_model(
-                pixel_values=siglip_pixel_values.to(device=model_device, dtype=model_dtype),
-                intermediate_output=index
-            )
-            print(f"[encode_siglip_image_emb DEBUG] Call for index {index} returned tuple of type: {type(res_tuple)}, length: {len(res_tuple) if isinstance(res_tuple, tuple) else 'N/A'}")
-
-            if not isinstance(res_tuple, tuple) or len(res_tuple) < 2: # Need at least last_hidden_state and intermediate_output
-                raise ValueError(
-                    f"Unexpected output tuple structure for intermediate_output={index}. "
-                    f"Expected at least 2 elements, got {len(res_tuple) if isinstance(res_tuple, tuple) else type(res_tuple)}"
-                )
-
-            # Intermediate output is typically the second element
-            intermediate_outputs.append(res_tuple[1][:, 1:]) # Exclude CLS token
-
-            # Capture final outputs from the last iteration (or any, they should be consistent from the encoder itself)
-            # The projected_pooled_output might change if the projection depends on the intermediate layer,
-            # but last_hidden_state from the vision_model part should be the same.
-            # Let's take them from the last specified index call for consistency.
-            if index == required_indices[-1]:
-                last_hidden_state = res_tuple[0][:, 1:] # Exclude CLS token
-                if len(res_tuple) >= 3:
-                    pooled_output = res_tuple[2] # Projected pooled output
-                else:
-                    # This case might occur if the tuple structure is shorter than expected (e.g. no multimodal projector output)
-                    # or if the pooled output is not the third element.
-                    # For safety, one might make a separate call without intermediate_output if pooled_output is critical and missing.
-                    # However, ComfyUI's CLIPVisionModelProjection usually provides it.
-                    print(f"[encode_siglip_image_emb WARNING] Pooled output (res_tuple[2]) not found for index {index}. Length: {len(res_tuple)}. Setting to None.")
-                    pooled_output = None
-
-
-        if not intermediate_outputs or len(intermediate_outputs) != len(required_indices):
-            raise RuntimeError(f"Failed to retrieve all required intermediate hidden states. Expected {len(required_indices)}, got {len(intermediate_outputs)}.")
-        if last_hidden_state is None:
-            # This could happen if required_indices is empty or loop logic fails
-            raise RuntimeError("Failed to retrieve last_hidden_state from SigLIP model.")
-        # pooled_output can be None if not found, handle accordingly in consuming code if critical
-
-        # Combine shallow embeddings
-        # Assuming intermediate outputs are [Batch, SeqLen, Dim_layer], concatenate along sequence dim after CLS stripping
-        siglip_image_shallow_embeds = torch.cat(intermediate_outputs, dim=1)
-
-        siglip_image_embeds = last_hidden_state
-        # pooled_output is already set
-
-        if siglip_image_embeds is None: # Redundant check if previous one passes, but good for safety
-            raise ValueError("SigLIP last_hidden_state (siglip_image_embeds) is None after processing.")
-        if siglip_image_shallow_embeds is None:
-             raise ValueError("Combined siglip_image_shallow_embeds is None after processing.")
-        # siglip_pooled_output can be None, so no strict check here unless always required
-
-        return siglip_image_embeds, pooled_output, siglip_image_shallow_embeds
-
-    @torch.inference_mode()
-    def encode_dinov2_image_emb(self, dinov2_pixel_values, device, dtype):
-        # dinov2_pixel_values are preprocessed tensors.
-        
-        # Determine device and dtype from the model if possible, otherwise use input
-        try:
-            model_device = next(self.dinov2_image_encoder_model.parameters()).device
-            model_dtype = next(self.dinov2_image_encoder_model.parameters()).dtype
-        except StopIteration:
-            print("[encode_dinov2_image_emb WARNING] self.dinov2_image_encoder_model has no parameters. Using input device/dtype.")
+            print("[encode_siglip_image_emb WARNING] encoder_model_to_use has no parameters. Using input device/dtype.")
             model_device = device
             model_dtype = dtype
         except AttributeError:
-            print("[encode_dinov2_image_emb WARNING] Could not get parameters from self.dinov2_image_encoder_model. Using input device/dtype.")
+            print("[encode_siglip_image_emb WARNING] Could not get parameters from encoder_model_to_use. Using input device/dtype.")
             model_device = device
             model_dtype = dtype
 
-        self.dinov2_image_encoder_model.to(device=model_device, dtype=model_dtype)
+        # Ensure the underlying HF model is on the correct device/dtype
+        clip_vision_object.vision_model.to(device=model_device, dtype=model_dtype)
         
-        required_indices = [9, 19, 29] # Specific layers for DINOv2
-        dinov2_intermediate_layers = []
-        dinov2_image_embeds = None # Will be set from the first call
+        print(f"[encode_siglip_image_emb DEBUG] Calling {type(clip_vision_object)}.get_image_features with output_hidden_states=True")
+        # Call get_image_features directly
+        res = clip_vision_object.get_image_features(
+            pixel_values=siglip_pixel_values.to(device=model_device, dtype=model_dtype),
+            output_hidden_states=True,
+            return_dict=True # Ensure we get a BaseModelOutputWithPooling-like object
+        )
 
-        for i, layer_idx in enumerate(required_indices):
-            print(f"[encode_dinov2_image_emb DEBUG] Calling self.dinov2_image_encoder_model ({type(self.dinov2_image_encoder_model)}) with intermediate_output={layer_idx}...")
-            comfy_output = self.dinov2_image_encoder_model(
-                pixel_values=dinov2_pixel_values.to(device=model_device, dtype=model_dtype),
-                intermediate_output=layer_idx
+        if not hasattr(res, 'last_hidden_state') or not hasattr(res, 'hidden_states'):
+            raise ValueError(
+                f"Unexpected output from SigLIP model. Expected 'last_hidden_state' and 'hidden_states'. Got: {type(res)}"
             )
 
-            if not isinstance(comfy_output, tuple) or len(comfy_output) < 2: # Need at least last_hidden_state and intermediate_output
-                raise TypeError(f"Unexpected output type from dinov2_image_encoder_model for layer {layer_idx}: {type(comfy_output)}. Expected a tuple of at least 2 elements.")
+        siglip_deep_features = res.last_hidden_state[:, 1:]
 
-            if i == 0: # Get last_hidden_state from the first call
-                dinov2_image_embeds = comfy_output[0]
-                if dinov2_image_embeds is None:
-                    raise ValueError(f"Failed to retrieve last_hidden_state from DINOv2 model output for layer {layer_idx}.")
-                # DINOv2 typically excludes CLS token for image features
-                if dinov2_image_embeds.shape[1] > 1: # Check if there's more than one token (CLS + patches)
-                    dinov2_image_embeds = dinov2_image_embeds[:, 1:]
-
-
-            intermediate_layer = comfy_output[1]
-            if intermediate_layer is None:
-                raise ValueError(f"Failed to retrieve intermediate layer {layer_idx} from DINOv2 model output.")
-            # DINOv2 typically excludes CLS token for image features
-            if intermediate_layer.shape[1] > 1: # Check if there's more than one token
-                 intermediate_layer = intermediate_layer[:, 1:]
-            dinov2_intermediate_layers.append(intermediate_layer)
-
-        if not dinov2_intermediate_layers:
-            raise ValueError("No intermediate layers were extracted for DINOv2.")
-            
-        dinov2_image_shallow_embeds = torch.cat(dinov2_intermediate_layers, dim=1)
+        # SigLIP ViT-SO400M-Patch14-384 has 27 layers. hidden_states tuple has 28 elements (embeddings + 27 layers).
+        # Indices 7, 13, 26 are valid if 0-indexed into the tuple of (embeddings, layer1_out, layer2_out, ...).
+        # HF `hidden_states` includes initial embeddings as hidden_states[0], then layer_1_output as hidden_states[1], etc.
+        # So, output of "layer N" is at `res.hidden_states[N]`.
+        # The prompt's indices 7, 13, 26 likely refer to these direct tuple indices.
+        siglip_shallow_layer_indices = [7, 13, 26]
         
-        if dinov2_image_embeds is None:
-             raise ValueError("dinov2_image_embeds (last_hidden_state) was not properly set.")
+        selected_shallow_layers = []
+        for layer_idx in siglip_shallow_layer_indices:
+            if layer_idx < len(res.hidden_states):
+                layer_output = res.hidden_states[layer_idx]
+                selected_shallow_layers.append(layer_output[:, 1:]) # Strip CLS
+            else:
+                raise ValueError(f"SigLIP shallow layer index {layer_idx} is out of bounds. "
+                                 f"Model has {len(res.hidden_states)-1} layers (output tuple length {len(res.hidden_states)} including embeddings). Max index: {len(res.hidden_states)-1}")
+        
+        if not selected_shallow_layers:
+            raise ValueError("No shallow layers were selected for SigLIP. Check indices.")
+            
+        siglip_shallow_features = torch.cat(selected_shallow_layers, dim=1)
 
-        return dinov2_image_embeds, dinov2_image_shallow_embeds
+        return siglip_deep_features, siglip_shallow_features
+
+    @torch.inference_mode()
+    def encode_dinov2_image_emb(self, dinov2_pixel_values, device, dtype):
+        if self.dinov2_image_encoder_model is None:
+            raise ValueError("DINOv2 image encoder model is not initialized.")
+
+        clip_vision_object = self.dinov2_image_encoder_model.vision_model # This is comfy.clip_model.CLIPVision
+        try:
+            # Get device/dtype from the underlying HF model wrapped by CLIPVision
+            model_device = next(clip_vision_object.vision_model.parameters()).device
+            model_dtype = next(clip_vision_object.vision_model.parameters()).dtype
+            model_dtype = next(encoder_model_to_use.parameters()).dtype
+        except StopIteration:
+            print("[encode_dinov2_image_emb WARNING] encoder_model_to_use has no parameters. Using input device/dtype.")
+            model_device = device
+            model_dtype = dtype
+        except AttributeError:
+            print("[encode_dinov2_image_emb WARNING] Could not get parameters from encoder_model_to_use. Using input device/dtype.")
+            model_device = device
+            model_dtype = dtype
+            
+        # Ensure the underlying HF model is on the correct device/dtype
+        clip_vision_object.vision_model.to(device=model_device, dtype=model_dtype)
+
+        print(f"[encode_dinov2_image_emb DEBUG] Calling {type(clip_vision_object)}.get_image_features with output_hidden_states=True")
+        # Call get_image_features directly
+        res = clip_vision_object.get_image_features(
+            pixel_values=dinov2_pixel_values.to(device=model_device, dtype=model_dtype),
+            output_hidden_states=True,
+            return_dict=True # Ensure we get a BaseModelOutputWithPooling-like object
+        )
+
+        if not hasattr(res, 'last_hidden_state') or not hasattr(res, 'hidden_states'):
+            raise ValueError(
+                f"Unexpected output from DINOv2 model. Expected 'last_hidden_state' and 'hidden_states'. Got: {type(res)}"
+            )
+
+        dinov2_deep_features = res.last_hidden_state[:, 1:]
+
+        # DINOv2-Giant (ViT-g/14) has 40 layers. hidden_states tuple has 41 elements.
+        # Indices 9, 19, 29 are direct tuple indices.
+        dinov2_shallow_layer_indices = [9, 19, 29]
+        
+        selected_shallow_layers = []
+        for layer_idx in dinov2_shallow_layer_indices:
+            if layer_idx < len(res.hidden_states):
+                layer_output = res.hidden_states[layer_idx]
+                selected_shallow_layers.append(layer_output[:, 1:]) # Strip CLS
+            else:
+                raise ValueError(f"DINOv2 shallow layer index {layer_idx} is out of bounds. "
+                                 f"Model has {len(res.hidden_states)-1} layers (output tuple length {len(res.hidden_states)} including embeddings). Max index: {len(res.hidden_states)-1}")
+        
+        if not selected_shallow_layers:
+            raise ValueError("No shallow layers were selected for DINOv2. Check indices.")
+
+        dinov2_shallow_features = torch.cat(selected_shallow_layers, dim=1)
+
+        return dinov2_deep_features, dinov2_shallow_features
 
     @torch.inference_mode()
     def encode_image_emb(self, subject_image_pil: Image.Image, device, dtype):
-        # Input handling for subject_image_pil
         if isinstance(subject_image_pil, torch.Tensor):
-            # Assuming ComfyUI IMAGE tensor [B, H, W, C], range [0, 1]
-            # Select the first image in the batch
             if subject_image_pil.ndim == 4 and subject_image_pil.shape[0] > 0:
                 image_tensor_slice = subject_image_pil[0]
-            elif subject_image_pil.ndim == 3: # Handle case if batch dim is missing
+            elif subject_image_pil.ndim == 3:
                 image_tensor_slice = subject_image_pil
             else:
                 raise ValueError(f"Unsupported tensor shape for subject_image_pil: {subject_image_pil.shape}")
-            # Convert to numpy HxWxC, range [0, 255], uint8
             image_np = (image_tensor_slice.cpu().numpy() * 255).astype(np.uint8)
-            # Convert to PIL Image
             pil_image_to_process = Image.fromarray(image_np, 'RGB')
         elif isinstance(subject_image_pil, list):
-            # Assuming a list of PIL Images, take the first one
             if len(subject_image_pil) > 0 and isinstance(subject_image_pil[0], Image.Image):
                 pil_image_to_process = subject_image_pil[0]
             else:
-                # Handle case where list might contain non-PIL Images or be empty.
                 raise ValueError("Input subject_image_pil is a list, but does not contain a PIL Image at the first position or is empty.")
         elif isinstance(subject_image_pil, Image.Image):
-            # Input is already a PIL Image
             pil_image_to_process = subject_image_pil
         else:
             raise ValueError(f"Unsupported type for subject_image_pil: {type(subject_image_pil)}")
 
-        # Now use pil_image_to_process for subsequent operations
-        # Cropping and resizing logic for low_res and high_res PIL images
-        object_image_pil_low_res = pil_image_to_process.resize((384, 384)) # Ensure this is a single PIL image
+        object_image_pil_low_res = pil_image_to_process.resize((384, 384))
         object_image_pil_high_res_orig = pil_image_to_process.resize((768, 768))
         object_image_pil_high_res_crops = [
             object_image_pil_high_res_orig.crop((0, 0, 384, 384)),
@@ -456,92 +416,78 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
             object_image_pil_high_res_orig.crop((0, 384, 384, 768)),
             object_image_pil_high_res_orig.crop((384, 384, 768, 768)),
         ]
-        nb_split_image = len(object_image_pil_high_res_crops)
+        # nb_split_image = len(object_image_pil_high_res_crops) # Not strictly needed with current loop
 
-        # Preprocess PIL images using the ComfyUI CLIP_VISION objects
         siglip_low_res_pixels = self._comfy_clip_vision_preprocess_pil(self.siglip_image_processor, object_image_pil_low_res)
         dinov2_low_res_pixels = self._comfy_clip_vision_preprocess_pil(self.dinov2_image_processor, object_image_pil_low_res)
 
-        siglip_embeds_tuple = self.encode_siglip_image_emb(siglip_low_res_pixels, device, dtype)
-        dinov2_embeds_tuple = self.encode_dinov2_image_emb(dinov2_low_res_pixels, device, dtype)
+        siglip_deep_low, siglip_shallow_low = self.encode_siglip_image_emb(siglip_low_res_pixels, device, dtype)
+        dinov2_deep_low, dinov2_shallow_low = self.encode_dinov2_image_emb(dinov2_low_res_pixels, device, dtype)
 
-        siglip_deep_features = siglip_embeds_tuple[0]  # Shape: (B, 729, D_siglip)
-        dinov2_deep_features = dinov2_embeds_tuple[0]  # Shape: (B, 1369, D_dinov2)
+        # Assertion/Verification for low-res deep features
+        if siglip_deep_low.shape[1] != dinov2_deep_low.shape[1]:
+            print(f"[encode_image_emb WARNING] Low-res DEEP feature sequence lengths mismatch after CLS strip and before fusion: "
+                  f"SigLIP: {siglip_deep_low.shape[1]}, DINOv2: {dinov2_deep_low.shape[1]}. "
+                  "This may require preprocessing adjustments or spatial interpolation if not intended. "
+                  "Proceeding with concatenation; ensure this is the desired behavior if lengths differ.")
+        
+        # Assertion/Verification for low-res shallow features
+        # The sequence length of shallow features is sum_of_patches_from_selected_layers.
+        # This assertion checks if the *total concatenated shallow sequence length* matches.
+        if siglip_shallow_low.shape[1] != dinov2_shallow_low.shape[1]:
+            print(f"[encode_image_emb WARNING] Low-res SHALLOW feature sequence lengths mismatch after CLS strip and before fusion: "
+                  f"SigLIP: {siglip_shallow_low.shape[1]}, DINOv2: {dinov2_shallow_low.shape[1]}. "
+                   "This may require preprocessing adjustments or spatial interpolation if not intended. "
+                   "Proceeding with concatenation; ensure this is the desired behavior if lengths differ.")
 
-        # Determine spatial dimensions (assuming square patch grid)
-        B_s, seq_len_siglip, D_siglip = siglip_deep_features.shape
-        s_sqrt_siglip = seq_len_siglip**0.5
-        if int(s_sqrt_siglip) * int(s_sqrt_siglip) == seq_len_siglip: # Check if it's a perfect square
-            H_s = W_s = int(s_sqrt_siglip)
-            print(f"[encode_image_emb DEBUG] For SigLIP (len {seq_len_siglip}), using H_s={H_s}, W_s={W_s} (perfect square)")
-        else:
-            found_factors_s = False
-            for h_candidate in range(int(s_sqrt_siglip), 0, -1): # Iterate downwards from int(sqrt(N))
-                if seq_len_siglip % h_candidate == 0:
-                    H_s = h_candidate
-                    W_s = seq_len_siglip // H_s
-                    found_factors_s = True
-                    print(f"[encode_image_emb DEBUG] For SigLIP (len {seq_len_siglip}), found factors H_s={H_s}, W_s={W_s}")
-                    break
-            if not found_factors_s:
-                 raise ValueError(f"Could not find integer factors H_s, W_s for SigLIP sequence length {seq_len_siglip}")
-
-        B_d, seq_len_dinov2, D_dinov2 = dinov2_deep_features.shape
-        s_sqrt_dinov2 = seq_len_dinov2**0.5
-        if int(s_sqrt_dinov2) * int(s_sqrt_dinov2) == seq_len_dinov2: # Check if it's a perfect square
-            H_d = W_d = int(s_sqrt_dinov2)
-            print(f"[encode_image_emb DEBUG] For DINOv2 (len {seq_len_dinov2}), using H_d={H_d}, W_d={W_d} (perfect square)")
-        else:
-            found_factors_d = False
-            for h_candidate_d in range(int(s_sqrt_dinov2), 0, -1): # Iterate downwards from int(sqrt(N))
-                if seq_len_dinov2 % h_candidate_d == 0:
-                    H_d = h_candidate_d
-                    W_d = seq_len_dinov2 // h_candidate_d
-                    found_factors_d = True
-                    print(f"[encode_image_emb DEBUG] For DINOv2 (len {seq_len_dinov2}), found factors H_d={H_d}, W_d={W_d}")
-                    break
-            if not found_factors_d:
-                 raise ValueError(f"Could not find integer factors H_d, W_d for DINOv2 sequence length {seq_len_dinov2}")
-
-        # The checks for H_s * W_s == seq_len_siglip and H_d * W_d == seq_len_dinov2 are now implicitly handled by the factorization.
-
-        # Reshape SigLIP features for interpolation (B, C, H, W)
-        # (B, SeqLen, Dim) -> (B, Dim, SeqLen) -> (B, Dim, H_s, W_s)
-        siglip_deep_features_spatial = siglip_deep_features.permute(0, 2, 1).reshape(B_s, D_siglip, H_s, W_s)
-
-        # Interpolate SigLIP features to match DINOv2 spatial dimensions (target: H_d, W_d)
-        siglip_deep_features_resized_spatial = torch.nn.functional.interpolate(
-            siglip_deep_features_spatial,
-            size=(H_d, W_d),  # Target spatial dimensions (37, 37)
-            mode='bilinear',
-            align_corners=False
-        )
-
-        # Reshape interpolated SigLIP features back to (B, SeqLen, Dim)
-        # (B, Dim, H_d, W_d) -> (B, Dim, H_d*W_d) -> (B, H_d*W_d, Dim)
-        siglip_deep_features_final = siglip_deep_features_resized_spatial.reshape(B_s, D_siglip, -1).permute(0, 2, 1)
-
-        # Now siglip_deep_features_final has shape (B, 1369, D_siglip)
-        # and dinov2_deep_features has shape (B, 1369, D_dinov2)
-        image_embeds_low_res_deep = torch.cat([siglip_deep_features_final, dinov2_deep_features], dim=2)
-        image_embeds_low_res_shallow = torch.cat([siglip_embeds_tuple[1], dinov2_embeds_tuple[1]], dim=2)
+        image_embeds_low_res_deep = torch.cat([siglip_deep_low, dinov2_deep_low], dim=2)
+        image_embeds_low_res_shallow = torch.cat([siglip_shallow_low, dinov2_shallow_low], dim=2)
 
         # High-resolution processing
-        siglip_high_res_pixels = self._comfy_clip_vision_preprocess_pil(self.siglip_image_processor, object_image_pil_high_res_crops)
-        # siglip_high_res_pixels = siglip_high_res_pixels[None] # Assuming preprocess handles batching correctly
-        siglip_high_res_pixels = rearrange(siglip_high_res_pixels, '(b n) c h w -> (b n) c h w', b=1, n=nb_split_image) # No-op if already batched by preprocess
-        
-        siglip_high_res_embeds_tuple = self.encode_siglip_image_emb(siglip_high_res_pixels, device, dtype)
-        siglip_image_high_res_deep = rearrange(siglip_high_res_embeds_tuple[0], '(b n) l c -> b (n l) c', n=nb_split_image)
+        all_siglip_high_res_deep_patches = []
+        all_dinov2_high_res_deep_patches = []
 
-        dinov2_high_res_pixels = self._comfy_clip_vision_preprocess_pil(self.dinov2_image_processor, object_image_pil_high_res_crops)
-        # dinov2_high_res_pixels = dinov2_high_res_pixels[None]
-        dinov2_high_res_pixels = rearrange(dinov2_high_res_pixels, '(b n) c h w -> (b n) c h w', b=1, n=nb_split_image)
+        for crop_pil in object_image_pil_high_res_crops:
+            siglip_patch_pixels = self._comfy_clip_vision_preprocess_pil(self.siglip_image_processor, crop_pil)
+            dinov2_patch_pixels = self._comfy_clip_vision_preprocess_pil(self.dinov2_image_processor, crop_pil)
 
-        dinov2_high_res_embeds_tuple = self.encode_dinov2_image_emb(dinov2_high_res_pixels, device, dtype)
-        dinov2_image_high_res_deep = rearrange(dinov2_high_res_embeds_tuple[0], '(b n) l c -> b (n l) c', n=nb_split_image)
+            siglip_deep_patch, _ = self.encode_siglip_image_emb(siglip_patch_pixels, device, dtype) # Ignore shallow
+            dinov2_deep_patch, _ = self.encode_dinov2_image_emb(dinov2_patch_pixels, device, dtype) # Ignore shallow
+            
+            all_siglip_high_res_deep_patches.append(siglip_deep_patch)
+            all_dinov2_high_res_deep_patches.append(dinov2_deep_patch)
+
+        if not all_siglip_high_res_deep_patches or not all_dinov2_high_res_deep_patches:
+            # This case should ideally not be reached if object_image_pil_high_res_crops is not empty
+            # and encoders work. Adding a fallback or clearer error.
+            print("[encode_image_emb WARNING] No high-resolution patch features were extracted. "
+                  "image_embeds_high_res_deep will be None or empty.")
+            # Depending on downstream requirements, this might need to be an error or a specific handling.
+            # For now, if lists are empty, cat will fail. Let's ensure they are not before cat.
+            if not all_siglip_high_res_deep_patches and not all_dinov2_high_res_deep_patches:
+                 image_embeds_high_res_deep = torch.empty(0, device=device, dtype=dtype) # Or handle as error
+            elif not all_siglip_high_res_deep_patches: # Only DINOv2 has patches
+                 all_siglip_high_res_deep = torch.empty_like(all_dinov2_high_res_deep_patches[0]) # Match shape for cat
+                 all_dinov2_high_res_deep = torch.cat(all_dinov2_high_res_deep_patches, dim=1)
+                 image_embeds_high_res_deep = torch.cat([all_siglip_high_res_deep, all_dinov2_high_res_deep], dim=2)
+            elif not all_dinov2_high_res_deep_patches: # Only SigLIP has patches
+                 all_dinov2_high_res_deep = torch.empty_like(all_siglip_high_res_deep_patches[0])
+                 all_siglip_high_res_deep = torch.cat(all_siglip_high_res_deep_patches, dim=1)
+                 image_embeds_high_res_deep = torch.cat([all_siglip_high_res_deep, all_dinov2_high_res_deep], dim=2)
+            else: # Should not happen if one list is empty and the other not, based on prior logic.
+                 raise ValueError("Inconsistent state in high-res patch processing.")
+
+        else: # Both lists have patches
+            all_siglip_high_res_deep = torch.cat(all_siglip_high_res_deep_patches, dim=1)
+            all_dinov2_high_res_deep = torch.cat(all_dinov2_high_res_deep_patches, dim=1)
         
-        image_embeds_high_res_deep = torch.cat([siglip_image_high_res_deep, dinov2_image_high_res_deep], dim=2)
+            if all_siglip_high_res_deep.shape[1] != all_dinov2_high_res_deep.shape[1]:
+                print(f"[encode_image_emb WARNING] High-res DEEP patch feature sequence lengths mismatch after concatenation: "
+                      f"SigLIP: {all_siglip_high_res_deep.shape[1]}, DINOv2: {all_dinov2_high_res_deep.shape[1]}. "
+                      "Proceeding with concatenation; ensure this is the desired behavior if lengths differ.")
+
+            image_embeds_high_res_deep = torch.cat([all_siglip_high_res_deep, all_dinov2_high_res_deep], dim=2)
+
 
         image_embeds_dict = dict(
             image_embeds_low_res_shallow=image_embeds_low_res_shallow.to(device=device, dtype=dtype),
