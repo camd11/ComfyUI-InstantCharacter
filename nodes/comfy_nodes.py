@@ -155,10 +155,10 @@ class InstantCharacterLoader:
        pipe = InstantCharacterFluxPipeline(
            flux_unet_model_object=flux_unet_model, # Now contains text_encoders/tokenizers
            vae_module=actual_vae,
-           siglip_hf_processor=siglip_processor, # Pass loaded HF processor
-           siglip_hf_model=siglip_hf_model,       # Pass loaded HF model
-           dinov2_hf_processor=dinov2_processor, # Pass loaded HF processor
-           dinov2_hf_model=dinov2_hf_model,       # Pass loaded HF model
+           siglip_vision_model_object=siglip_hf_model,    # Pass loaded HF SigLIP model as siglip_vision_model_object
+           siglip_processor_object=siglip_processor,      # Pass loaded HF SigLIP processor as siglip_processor_object
+           dinov2_vision_model_object=dinov2_hf_model,    # Pass loaded HF DINOv2 model as dinov2_vision_model_object
+           dinov2_processor_object=dinov2_processor,      # Pass loaded HF DINOv2 processor as dinov2_processor_object
            ipadapter_model_data_dict=ipadapter_model_data,
            sampler_object=sampler # Pass sampler to pipeline
            # dtype is handled by the pipeline's __init__

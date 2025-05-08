@@ -55,14 +55,12 @@ def retrieve_timesteps(scheduler, num_inference_steps, device, sigmas=None, mu=0
 
 class InstantCharacterFluxPipeline(nn.Module): # Changed base class
     def __init__(self,
-                 flux_unet_model_object,      # ComfyUI MODEL object
+                 flux_unet_model_object,      # ComfyUI MODEL object (contains transformer, text_encoders, tokenizers)
                  vae_module,                  # VAE nn.Module
-                 siglip_vision_model_object,  # ComfyUI CLIP_VISION object for SigLIP (kept for now, role may change)
-                 dinov2_vision_model_object,  # ComfyUI CLIP_VISION object for DINOv2 (kept for now, role may change)
-                 siglip_hf_model,             # Raw Hugging Face SigLIP model
-                 siglip_hf_processor,         # Raw Hugging Face SigLIP processor
-                 dinov2_hf_model,             # Raw Hugging Face DINOv2 model
-                 dinov2_hf_processor,         # Raw Hugging Face DINOv2 processor
+                 siglip_vision_model_object,  # Raw Hugging Face SigLIP vision model
+                 siglip_processor_object,     # Raw Hugging Face SigLIP image processor
+                 dinov2_vision_model_object,  # Raw Hugging Face DINOv2 vision model
+                 dinov2_processor_object,     # Raw Hugging Face DINOv2 image processor
                  ipadapter_model_data_dict,   # Dict of IPAdapter weights
                  sampler_object,              # ComfyUI SAMPLER object
                  dtype=torch.bfloat16):
@@ -110,28 +108,39 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
             raise ValueError("A sampler_object must be provided to InstantCharacterFluxPipeline.")
         print("InstantCharacterPipeline: Assigned self.scheduler from sampler_object.")
 
-        # Store ComfyUI CLIP_VISION wrapper objects (their direct use will be reduced)
-        self.siglip_vision_wrapper = siglip_vision_model_object
-        self.dinov2_vision_wrapper = dinov2_vision_model_object
-        print(f"InstantCharacterPipeline: Stored ComfyUI SigLIP wrapper (type: {type(self.siglip_vision_wrapper)}).")
-        print(f"InstantCharacterPipeline: Stored ComfyUI DINOv2 wrapper (type: {type(self.dinov2_vision_wrapper)}).")
+        # Assign SigLIP and DINOv2 models and processors
+        self.siglip_vision_model = siglip_vision_model_object
+        self.siglip_processor = siglip_processor_object
+        self.dinov2_vision_model = dinov2_vision_model_object
+        self.dinov2_processor = dinov2_processor_object
 
-        # Store raw Hugging Face models and processors
-        self.siglip_hf_model = siglip_hf_model
-        self.siglip_hf_processor = siglip_hf_processor
-        self.dinov2_hf_model = dinov2_hf_model
-        self.dinov2_hf_processor = dinov2_hf_processor
+        # Harmonize SigLIP processor image size to match DINOv2 processor
+        if self.dinov2_processor is not None and hasattr(self.dinov2_processor, 'size') and \
+           self.siglip_processor is not None and hasattr(self.siglip_processor, 'size'):
+            try:
+                target_height = self.dinov2_processor.size["height"]
+                target_width = self.dinov2_processor.size["width"]
+                self.siglip_processor.size["height"] = target_height
+                self.siglip_processor.size["width"] = target_width
+                print(f"[InstantCharacterPipeline INFO] Harmonized SigLIP processor image size to: {self.siglip_processor.size} to match DINOv2 processor.")
+            except KeyError as e:
+                print(f"[InstantCharacterPipeline WARNING] Could not harmonize processor sizes. Missing key in processor.size: {e}")
+            except Exception as e:
+                print(f"[InstantCharacterPipeline WARNING] An unexpected error occurred during processor size harmonization: {e}")
+        elif self.dinov2_processor is None or not hasattr(self.dinov2_processor, 'size'):
+            print("[InstantCharacterPipeline WARNING] DINOv2 processor or its size attribute is not available for harmonization.")
+        elif self.siglip_processor is None or not hasattr(self.siglip_processor, 'size'):
+            print("[InstantCharacterPipeline WARNING] SigLIP processor or its size attribute is not available for harmonization.")
 
-        if self.siglip_hf_model is None or self.siglip_hf_processor is None:
-            print("Warning: Raw SigLIP Hugging Face model or processor is None.")
+        if self.siglip_vision_model is None or self.siglip_processor is None:
+            print("Warning: SigLIP vision model or processor is None.")
         else:
-            print(f"InstantCharacterPipeline: Assigned raw HF SigLIP model (type: {type(self.siglip_hf_model)}) and processor (type: {type(self.siglip_hf_processor)}).")
+            print(f"InstantCharacterPipeline: Assigned SigLIP model (type: {type(self.siglip_vision_model)}) and processor (type: {type(self.siglip_processor)}).")
 
-        if self.dinov2_hf_model is None or self.dinov2_hf_processor is None:
-            print("Warning: Raw DINOv2 Hugging Face model or processor is None.")
+        if self.dinov2_vision_model is None or self.dinov2_processor is None:
+            print("Warning: DINOv2 vision model or processor is None.")
         else:
-            print(f"InstantCharacterPipeline: Assigned raw HF DINOv2 model (type: {type(self.dinov2_hf_model)}) and processor (type: {type(self.dinov2_hf_processor)}).")
-
+            print(f"InstantCharacterPipeline: Assigned DINOv2 model (type: {type(self.dinov2_vision_model)}) and processor (type: {type(self.dinov2_processor)}).")
 
         self._initialize_ip_adapter_components(ipadapter_model_data_dict, self.dtype)
 
@@ -230,20 +239,20 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
     @torch.inference_mode()
     def encode_siglip_image_emb(self, siglip_image, device, dtype):
         """Encodes SigLIP image and extracts deep/shallow features using the stored HF model."""
-        if self.siglip_hf_model is None:
-            raise ValueError("SigLIP Hugging Face model is not initialized.")
+        if self.siglip_vision_model is None:
+            raise ValueError("SigLIP vision model (self.siglip_vision_model) is not initialized.")
             
         siglip_image = siglip_image.to(device=device, dtype=dtype)
 
         # Use the stored Hugging Face model directly
-        hf_vit = self.siglip_hf_model
+        hf_vit = self.siglip_vision_model
         hf_vit.to(device=device, dtype=dtype) # Ensure device/dtype
 
         # one forward, all hidden states
         print(f"[encode_siglip_image_emb DEBUG] Calling stored HF SigLIP model {type(hf_vit)} with output_hidden_states=True")
-        outs = hf_vit(pixel_values=siglip_image,
-                      output_hidden_states=True,
-                      return_dict=True) # Use return_dict for reliable access
+        outs = self.siglip_vision_model.vision_model(pixel_values=siglip_image,
+                                                     output_hidden_states=True,
+                                                     return_dict=True) # Use return_dict for reliable access
                       
         if not hasattr(outs, "hidden_states") or outs.hidden_states is None:
              raise ValueError(f"HF SigLIP model did not return 'hidden_states'. Output type: {type(outs)}")
@@ -273,13 +282,13 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
     @torch.inference_mode()
     def encode_dinov2_image_emb(self, dinov2_image, device, dtype):
         """Encodes DINOv2 image and extracts deep/shallow features using the stored HF model."""
-        if self.dinov2_hf_model is None:
-            raise ValueError("DINOv2 Hugging Face model is not initialized.")
+        if self.dinov2_vision_model is None:
+            raise ValueError("DINOv2 vision model (self.dinov2_vision_model) is not initialized.")
             
         dinov2_image = dinov2_image.to(device=device, dtype=dtype)
 
         # Use the stored Hugging Face model directly
-        hf_vit = self.dinov2_hf_model
+        hf_vit = self.dinov2_vision_model
         hf_vit.to(device=device, dtype=dtype) # Ensure device/dtype
 
         # one forward, all hidden states
@@ -345,13 +354,13 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
         ]
         # nb_split_image = len(object_image_pil_high_res_crops) # Not strictly needed with current loop
 
-        if self.siglip_hf_processor is None:
-            raise ValueError("SigLIP Hugging Face processor is not initialized.")
-        if self.dinov2_hf_processor is None:
-            raise ValueError("DINOv2 Hugging Face processor is not initialized.")
+        if self.siglip_processor is None:
+            raise ValueError("SigLIP processor (self.siglip_processor) is not initialized.")
+        if self.dinov2_processor is None:
+            raise ValueError("DINOv2 processor (self.dinov2_processor) is not initialized.")
 
-        siglip_low_res_pixels = self._hf_preprocess_pil(self.siglip_hf_processor, object_image_pil_low_res)
-        dinov2_low_res_pixels = self._hf_preprocess_pil(self.dinov2_hf_processor, object_image_pil_low_res)
+        siglip_low_res_pixels = self._hf_preprocess_pil(self.siglip_processor, object_image_pil_low_res)
+        dinov2_low_res_pixels = self._hf_preprocess_pil(self.dinov2_processor, object_image_pil_low_res)
 
         siglip_deep_low, siglip_shallow_low = self.encode_siglip_image_emb(siglip_low_res_pixels, device, dtype)
         dinov2_deep_low, dinov2_shallow_low = self.encode_dinov2_image_emb(dinov2_low_res_pixels, device, dtype)
