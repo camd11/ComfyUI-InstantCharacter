@@ -23,7 +23,8 @@ class InstantCharacterLoader:
         return {
             "required": {
                 "flux_unet_model": ("MODEL", {}),
-                "flux_text_encoder_one": ("CLIP", {}),
+                "flux_text_encoder_one": ("CLIP", {}), # Expects composite CLIP (CLIP-L + T5XXL) OR just CLIP-L
+                "flux_text_encoder_two": ("CLIP", {}), # Expects T5XXL CLIP object
                 "flux_vae": ("VAE", {}),
                 "siglip_vision_model": ("CLIP_VISION", {}),
                 "dinov2_vision_model": ("CLIP_VISION", {}),
@@ -40,7 +41,8 @@ class InstantCharacterLoader:
 
     def load_pipe_from_models(self,
                               flux_unet_model,
-                              flux_text_encoder_one, # flux_text_encoder_two removed
+                              flux_text_encoder_one, # Should be CLIP-L part
+                              flux_text_encoder_two, # Add argument for the second encoder (T5XXL part)
                               flux_vae,
                               siglip_vision_model,
                               dinov2_vision_model,
@@ -62,37 +64,69 @@ class InstantCharacterLoader:
         actual_unet = flux_unet_model.model
         actual_vae = flux_vae.first_stage_model # Preserved from original block
 
-        # Get CLIP Input (from method argument)
-        clip_input_one = flux_text_encoder_one # This is the key input now
+        # Logic to extract components from potentially separate CLIP objects
         
-        # Corrected logic for extracting text encoder and tokenizer components
-        # from the composite CLIP object (flux_text_encoder_one).
-
         text_encoder_1_module = None
         tokenizer_1_instance = None
         text_encoder_2_module = None
         tokenizer_2_instance = None
 
-        if clip_input_one: # clip_input_one is flux_text_encoder_one from inputs
-            # Check for tokenizer attribute
-            if hasattr(clip_input_one, 'tokenizer') and clip_input_one.tokenizer is not None:
-                # Extract CLIP-L tokenizer
-                if hasattr(clip_input_one.tokenizer, 'clip_l'):
-                    tokenizer_1_instance = clip_input_one.tokenizer.clip_l
-                
-                # Extract T5XXL tokenizer
-                if hasattr(clip_input_one.tokenizer, 't5xxl'):
-                    tokenizer_2_instance = clip_input_one.tokenizer.t5xxl
-            
-            # Check for cond_stage_model attribute
-            if hasattr(clip_input_one, 'cond_stage_model') and clip_input_one.cond_stage_model is not None:
-                # Extract CLIP-L text encoder module
-                if hasattr(clip_input_one.cond_stage_model, 'clip_l'):
-                    text_encoder_1_module = clip_input_one.cond_stage_model.clip_l
-                
-                # Extract T5XXL text encoder module
-                if hasattr(clip_input_one.cond_stage_model, 't5xxl'):
-                    text_encoder_2_module = clip_input_one.cond_stage_model.t5xxl
+        # --- Process Encoder 1 (Expected: CLIP-L) ---
+        if flux_text_encoder_one:
+            # Assume flux_text_encoder_one directly provides CLIP-L components
+            if hasattr(flux_text_encoder_one, 'tokenizer'):
+                 # If it's composite, try getting clip_l, else assume it IS clip_l tokenizer
+                if hasattr(flux_text_encoder_one.tokenizer, 'clip_l'):
+                    tokenizer_1_instance = flux_text_encoder_one.tokenizer.clip_l
+                else: # Assume flux_text_encoder_one.tokenizer *is* the CLIP-L tokenizer
+                    tokenizer_1_instance = flux_text_encoder_one.tokenizer
+                    print("InstantCharacterLoader: Assuming flux_text_encoder_one.tokenizer is CLIP-L tokenizer.")
+            else:
+                 print("InstantCharacterLoader WARNING: flux_text_encoder_one missing 'tokenizer' attribute.")
+
+            if hasattr(flux_text_encoder_one, 'cond_stage_model'):
+                 # If it's composite, try getting clip_l, else assume it IS clip_l encoder
+                if hasattr(flux_text_encoder_one.cond_stage_model, 'clip_l'):
+                    text_encoder_1_module = flux_text_encoder_one.cond_stage_model.clip_l
+                else: # Assume flux_text_encoder_one.cond_stage_model *is* the CLIP-L encoder
+                    text_encoder_1_module = flux_text_encoder_one.cond_stage_model
+                    print("InstantCharacterLoader: Assuming flux_text_encoder_one.cond_stage_model is CLIP-L encoder.")
+            else:
+                 print("InstantCharacterLoader WARNING: flux_text_encoder_one missing 'cond_stage_model' attribute.")
+        else:
+             print("InstantCharacterLoader WARNING: flux_text_encoder_one is None.")
+
+
+        # --- Process Encoder 2 (Expected: T5XXL) ---
+        if flux_text_encoder_two:
+            # Assume flux_text_encoder_two directly provides T5XXL components
+            if hasattr(flux_text_encoder_two, 'tokenizer'):
+                 # If it's composite, try getting t5xxl, else assume it IS t5xxl tokenizer
+                if hasattr(flux_text_encoder_two.tokenizer, 't5xxl'):
+                     tokenizer_2_instance = flux_text_encoder_two.tokenizer.t5xxl
+                else: # Assume flux_text_encoder_two.tokenizer *is* the T5XXL tokenizer
+                    tokenizer_2_instance = flux_text_encoder_two.tokenizer
+                    print("InstantCharacterLoader: Assuming flux_text_encoder_two.tokenizer is T5XXL tokenizer.")
+            else:
+                 print("InstantCharacterLoader WARNING: flux_text_encoder_two missing 'tokenizer' attribute.")
+
+            if hasattr(flux_text_encoder_two, 'cond_stage_model'):
+                 # If it's composite, try getting t5xxl, else assume it IS t5xxl encoder
+                if hasattr(flux_text_encoder_two.cond_stage_model, 't5xxl'):
+                    text_encoder_2_module = flux_text_encoder_two.cond_stage_model.t5xxl
+                else: # Assume flux_text_encoder_two.cond_stage_model *is* the T5XXL encoder
+                    text_encoder_2_module = flux_text_encoder_two.cond_stage_model
+                    print("InstantCharacterLoader: Assuming flux_text_encoder_two.cond_stage_model is T5XXL encoder.")
+            else:
+                 print("InstantCharacterLoader WARNING: flux_text_encoder_two missing 'cond_stage_model' attribute.")
+        else:
+             print("InstantCharacterLoader WARNING: flux_text_encoder_two is None.")
+
+        # --- Final Checks ---
+        if text_encoder_1_module is None or tokenizer_1_instance is None:
+             print("InstantCharacterLoader WARNING: Failed to extract Text Encoder 1 or Tokenizer 1.")
+        if text_encoder_2_module is None or tokenizer_2_instance is None:
+             print("InstantCharacterLoader WARNING: Failed to extract Text Encoder 2 or Tokenizer 2.")
         
         # Attach the extracted (or None) components to the flux_unet_model object.
         # The pipeline (InstantCharacterFluxPipeline) expects to find these attributes on flux_unet_model.
