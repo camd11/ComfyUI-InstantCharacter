@@ -4,7 +4,7 @@ import torch
 import folder_paths
 from PIL import Image
 import numpy as np
-from transformers import AutoProcessor, AutoModel
+from transformers import AutoProcessor, AutoModel, SiglipImageProcessor, AutoImageProcessor
 
 # Add the parent directory to the Python path so we can import
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -143,12 +143,12 @@ class InstantCharacterLoader:
 
        # Load SigLIP and DINOv2 models and processors using transformers
        print(f"InstantCharacterLoader: Loading SigLIP model from: {siglip_model_name_or_path}")
-       siglip_processor = AutoProcessor.from_pretrained(siglip_model_name_or_path)
+       siglip_processor = SiglipImageProcessor.from_pretrained(siglip_model_name_or_path)
        siglip_hf_model = AutoModel.from_pretrained(siglip_model_name_or_path)
        print(f"InstantCharacterLoader: SigLIP model loaded: {type(siglip_hf_model)}")
 
        print(f"InstantCharacterLoader: Loading DINOv2 model from: {dinov2_model_name_or_path}")
-       dinov2_processor = AutoProcessor.from_pretrained(dinov2_model_name_or_path)
+       dinov2_processor = AutoImageProcessor.from_pretrained(dinov2_model_name_or_path)
        dinov2_hf_model = AutoModel.from_pretrained(dinov2_model_name_or_path)
        print(f"InstantCharacterLoader: DINOv2 model loaded: {type(dinov2_hf_model)}")
        
