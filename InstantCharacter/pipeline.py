@@ -57,8 +57,12 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
     def __init__(self,
                  flux_unet_model_object,      # ComfyUI MODEL object
                  vae_module,                  # VAE nn.Module
-                 siglip_vision_model_object,  # ComfyUI CLIP_VISION object for SigLIP
-                 dinov2_vision_model_object,  # ComfyUI CLIP_VISION object for DINOv2
+                 siglip_vision_model_object,  # ComfyUI CLIP_VISION object for SigLIP (kept for now, role may change)
+                 dinov2_vision_model_object,  # ComfyUI CLIP_VISION object for DINOv2 (kept for now, role may change)
+                 siglip_hf_model,             # Raw Hugging Face SigLIP model
+                 siglip_hf_processor,         # Raw Hugging Face SigLIP processor
+                 dinov2_hf_model,             # Raw Hugging Face DINOv2 model
+                 dinov2_hf_processor,         # Raw Hugging Face DINOv2 processor
                  ipadapter_model_data_dict,   # Dict of IPAdapter weights
                  sampler_object,              # ComfyUI SAMPLER object
                  dtype=torch.bfloat16):
@@ -106,23 +110,28 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
             raise ValueError("A sampler_object must be provided to InstantCharacterFluxPipeline.")
         print("InstantCharacterPipeline: Assigned self.scheduler from sampler_object.")
 
-        # Assign Image Encoders from CLIP_VISION objects
-        # Assign Image Encoders from CLIP_VISION objects
-        # Store the complete ComfyUI CLIP_VISION wrapper objects
-        self.siglip_image_processor = siglip_vision_model_object # Used for preprocessing attributes
-        self.siglip_image_encoder_model = siglip_vision_model_object # Store the whole wrapper
-        if self.siglip_image_encoder_model is None:
-             print("Warning: siglip_vision_model_object is None.")
-        else:
-             print(f"InstantCharacterPipeline: Assigned self.siglip_image_encoder_model (type: {type(self.siglip_image_encoder_model)}).")
+        # Store ComfyUI CLIP_VISION wrapper objects (their direct use will be reduced)
+        self.siglip_vision_wrapper = siglip_vision_model_object
+        self.dinov2_vision_wrapper = dinov2_vision_model_object
+        print(f"InstantCharacterPipeline: Stored ComfyUI SigLIP wrapper (type: {type(self.siglip_vision_wrapper)}).")
+        print(f"InstantCharacterPipeline: Stored ComfyUI DINOv2 wrapper (type: {type(self.dinov2_vision_wrapper)}).")
 
+        # Store raw Hugging Face models and processors
+        self.siglip_hf_model = siglip_hf_model
+        self.siglip_hf_processor = siglip_hf_processor
+        self.dinov2_hf_model = dinov2_hf_model
+        self.dinov2_hf_processor = dinov2_hf_processor
 
-        self.dinov2_image_processor = dinov2_vision_model_object # Used for preprocessing attributes
-        self.dinov2_image_encoder_model = dinov2_vision_model_object # Store the whole wrapper
-        if self.dinov2_image_encoder_model is None:
-             print("Warning: dinov2_vision_model_object is None.")
+        if self.siglip_hf_model is None or self.siglip_hf_processor is None:
+            print("Warning: Raw SigLIP Hugging Face model or processor is None.")
         else:
-             print(f"InstantCharacterPipeline: Assigned self.dinov2_image_encoder_model (type: {type(self.dinov2_image_encoder_model)}).")
+            print(f"InstantCharacterPipeline: Assigned raw HF SigLIP model (type: {type(self.siglip_hf_model)}) and processor (type: {type(self.siglip_hf_processor)}).")
+
+        if self.dinov2_hf_model is None or self.dinov2_hf_processor is None:
+            print("Warning: Raw DINOv2 Hugging Face model or processor is None.")
+        else:
+            print(f"InstantCharacterPipeline: Assigned raw HF DINOv2 model (type: {type(self.dinov2_hf_model)}) and processor (type: {type(self.dinov2_hf_processor)}).")
+
 
         self._initialize_ip_adapter_components(ipadapter_model_data_dict, self.dtype)
 
@@ -190,193 +199,119 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
         else:
             print("Warning: 'image_proj' key not found in ipadapter_state_dict. Image projection weights not loaded.")
 
-    def _comfy_clip_vision_preprocess_pil(self, image_processor_obj, pil_image: Image.Image):
+    def _hf_preprocess_pil(self, hf_processor, pil_image: Image.Image):
         """
-        Manually preprocesses a single PIL image using parameters from a ComfyUI CLIP_VISION object.
+        Preprocesses a single PIL image using a Hugging Face image processor.
         """
-        if image_processor_obj is None:
-            raise ValueError("image_processor_obj cannot be None for preprocessing.")
+        if hf_processor is None:
+            raise ValueError("hf_processor cannot be None for preprocessing.")
         if pil_image is None:
             raise ValueError("pil_image cannot be None for preprocessing.")
 
+        # Hugging Face processors typically expect a list of images and return a dict
+        # with 'pixel_values'.
+        # The processor handles resizing, normalization, and tensor conversion.
         try:
-            image_size = image_processor_obj.image_size
-            image_mean = image_processor_obj.image_mean
-            image_std = image_processor_obj.image_std
-        except AttributeError as e:
-            raise AttributeError(
-                f"Missing one or more required attributes (image_size, image_mean, image_std) "
-                f"on image_processor_obj (type: {type(image_processor_obj)}). Error: {e}"
-            )
-
-        # 1. Convert to RGB
-        image = pil_image.convert("RGB")
-
-        # 2. Resize and Crop
-        if isinstance(image_size, int):
-            target_size = image_size
-            # Resize shorter side to target_size
-            w, h = image.size
-            if w < h:
-                new_w = target_size
-                new_h = int(h * target_size / w)
-            else:
-                new_h = target_size
-                new_w = int(w * target_size / h)
-            image = image.resize((new_w, new_h), Image.BICUBIC)
-
-            # Center crop to (target_size, target_size)
-            left = (new_w - target_size) / 2
-            top = (new_h - target_size) / 2
-            right = (new_w + target_size) / 2
-            bottom = (new_h + target_size) / 2
-            image = image.crop((left, top, right, bottom))
-            target_height, target_width = target_size, target_size
-        elif isinstance(image_size, (list, tuple)) and len(image_size) == 2:
-            target_height, target_width = image_size
-            # PIL resize uses (width, height)
-            image = image.resize((target_width, target_height), Image.BICUBIC)
-        else:
-            raise ValueError(
-                f"image_size must be an int or a tuple/list of two ints. Got {image_size}"
-            )
-
-        # 3. Convert to Tensor and scale to [0, 1]
-        # Using TF.to_tensor which handles PIL to (C, H, W) tensor and scales to [0,1]
-        image_tensor = TF.to_tensor(image) # Shape: (C, H, W)
-
-        # 4. Normalize
-        if not isinstance(image_mean, (list, tuple)) or not isinstance(image_std, (list, tuple)):
-            raise ValueError("image_mean and image_std must be lists or tuples.")
-        if len(image_mean) != image_tensor.shape[0] or len(image_std) != image_tensor.shape[0]:
-             raise ValueError(f"image_mean/std length ({len(image_mean)}) must match image channels ({image_tensor.shape[0]})")
-
-        # Ensure mean and std are tensors with shape (C, 1, 1) for TF.normalize
-        # TF.normalize expects list/tuple for mean/std, it handles conversion internally.
-        normalized_tensor = TF.normalize(image_tensor, mean=image_mean, std=image_std)
-
-        # 5. Add Batch Dimension
-        pixel_values = normalized_tensor.unsqueeze(0) # Shape: (1, C, H, W)
+            # Common parameters for HF processors:
+            # images: The image(s) to preprocess.
+            # return_tensors: "pt" for PyTorch tensors.
+            # do_resize, size, resample: For resizing.
+            # do_center_crop, crop_size: For cropping.
+            # do_normalize, image_mean, image_std: For normalization.
+            # These are often configured when the processor is loaded.
+            # We assume the processor is already configured correctly.
+            processed_inputs = hf_processor(images=[pil_image.convert("RGB")], return_tensors="pt")
+            pixel_values = processed_inputs.pixel_values
+        except Exception as e:
+            raise RuntimeError(f"Error during Hugging Face processor preprocessing: {e}")
 
         return pixel_values.to(device=self.device, dtype=self.dtype)
 
-    def _get_hf_backbone(self, wrapper):
-        """
-        ComfyUI wraps a Hugging-Face vision transformer in different
-        attributes depending on the loader version.
-        Returns the HF model or raises AttributeError.
-        """
-        # Check common attributes where the HF model might be stored
-        for attr in ("vision_model", "model", "clip_model"):
-            if hasattr(wrapper, attr):
-                potential_model = getattr(wrapper, attr)
-                # Check if the attribute itself is the HF model (common case)
-                # A simple check: does it have a 'config' attribute typical of HF models?
-                if hasattr(potential_model, 'config') and callable(potential_model):
-                     print(f"[_get_hf_backbone DEBUG] Found HF model in wrapper attribute: '{attr}'")
-                     return potential_model
-                # Check if it's nested one level deeper (e.g., wrapper.vision_model.vision_model)
-                # This handles cases like CLIPVisionModelProjection containing CLIPVision containing HF model
-                if hasattr(potential_model, attr):
-                     nested_model = getattr(potential_model, attr)
-                     if hasattr(nested_model, 'config') and callable(nested_model):
-                          print(f"[_get_hf_backbone DEBUG] Found HF model in nested wrapper attribute: '{attr}.{attr}'")
-                          return nested_model
-
-        # If no common attribute path worked, raise an error
-        raise AttributeError(
-            f"Cannot locate HF backbone in {type(wrapper)}. "
-            f"Checked attributes: vision_model, model, clip_model (and nested versions)."
-        )
-
-
     @torch.inference_mode()
     def encode_siglip_image_emb(self, siglip_image, device, dtype):
-        """Encodes SigLIP image and extracts deep/shallow features using the underlying HF model."""
-        if self.siglip_image_encoder_model is None:
-            raise ValueError("SigLIP image encoder model wrapper is not initialized.")
-
+        """Encodes SigLIP image and extracts deep/shallow features using the stored HF model."""
+        if self.siglip_hf_model is None:
+            raise ValueError("SigLIP Hugging Face model is not initialized.")
+            
         siglip_image = siglip_image.to(device=device, dtype=dtype)
 
-        # Use helper to get the actual HF model, handling wrapper inconsistencies
-        hf_model = self._get_hf_backbone(self.siglip_image_encoder_model)
-        hf_model.to(device=device, dtype=dtype) # Ensure device/dtype
+        # Use the stored Hugging Face model directly
+        hf_vit = self.siglip_hf_model
+        hf_vit.to(device=device, dtype=dtype) # Ensure device/dtype
 
-        # single forward with every hidden state
-        print(f"[encode_siglip_image_emb DEBUG] Calling HF model {type(hf_model)} with output_hidden_states=True")
-        outputs = hf_model(pixel_values=siglip_image,
-                           output_hidden_states=True,
-                           return_dict=True) # Use return_dict for reliable access
+        # one forward, all hidden states
+        print(f"[encode_siglip_image_emb DEBUG] Calling stored HF SigLIP model {type(hf_vit)} with output_hidden_states=True")
+        outs = hf_vit(pixel_values=siglip_image,
+                      output_hidden_states=True,
+                      return_dict=True) # Use return_dict for reliable access
+                      
+        if not hasattr(outs, "hidden_states") or outs.hidden_states is None:
+             raise ValueError(f"HF SigLIP model did not return 'hidden_states'. Output type: {type(outs)}")
+        hid = outs.hidden_states        # tuple(len = layers + 1)
+        print(f"[encode_siglip_image_emb DEBUG] Total hidden states returned: {len(hid)}")
 
-        if not hasattr(outputs, "hidden_states") or outputs.hidden_states is None:
-             raise ValueError(f"HF SigLIP model did not return 'hidden_states'. Output type: {type(outputs)}")
-        hidden = outputs.hidden_states  # tuple (embeddings + per-layer)
-        print(f"[encode_siglip_image_emb DEBUG] Total hidden states returned: {len(hidden)}")
-
-        # deep features (last layer, drop CLS)
-        deep = hidden[-1][:, 1:, :]
-
+        deep    = hid[-1][:, 1:, :]     # last layer, drop CLS
+        
         # shallow features (layers 7, 13, 26, drop CLS, concat along features)
         siglip_shallow_layer_indices = [7, 13, 26]
         shallow_feats_list = []
         for i in siglip_shallow_layer_indices:
-            if i >= len(hidden):
-                 raise ValueError(f"SigLIP shallow layer index {i} is out of bounds. Max index: {len(hidden)-1}")
-            shallow_feats_list.append(hidden[i][:, 1:, :])
-
+            if i >= len(hid):
+                 raise ValueError(f"SigLIP shallow layer index {i} is out of bounds. Max index: {len(hid)-1}")
+            shallow_feats_list.append(hid[i][:, 1:, :])
+            
         if not shallow_feats_list:
              raise ValueError("No shallow layers were selected for SigLIP. Check indices.")
-
-        shallow = torch.cat(shallow_feats_list, dim=-1)
-
+             
+        shallow = torch.cat(shallow_feats_list, dim=-1) # Concatenate along feature dim
+        
         print(f"[encode_siglip_image_emb DEBUG] Deep features shape: {deep.shape}")
         print(f"[encode_siglip_image_emb DEBUG] Shallow features shape: {shallow.shape}")
-
+        
         return deep, shallow
 
     @torch.inference_mode()
     def encode_dinov2_image_emb(self, dinov2_image, device, dtype):
-        """Encodes DINOv2 image and extracts deep/shallow features using the underlying HF model."""
-        if self.dinov2_image_encoder_model is None:
-            raise ValueError("DINOv2 image encoder model wrapper is not initialized.")
-
+        """Encodes DINOv2 image and extracts deep/shallow features using the stored HF model."""
+        if self.dinov2_hf_model is None:
+            raise ValueError("DINOv2 Hugging Face model is not initialized.")
+            
         dinov2_image = dinov2_image.to(device=device, dtype=dtype)
 
-        # Use helper to get the actual HF model
-        hf_model = self._get_hf_backbone(self.dinov2_image_encoder_model)
-        hf_model.to(device=device, dtype=dtype) # Ensure device/dtype
+        # Use the stored Hugging Face model directly
+        hf_vit = self.dinov2_hf_model
+        hf_vit.to(device=device, dtype=dtype) # Ensure device/dtype
 
-        # single forward with every hidden state
-        print(f"[encode_dinov2_image_emb DEBUG] Calling HF model {type(hf_model)} with output_hidden_states=True")
-        outputs = hf_model(pixel_values=dinov2_image,
-                           output_hidden_states=True,
-                           return_dict=True) # Use return_dict for reliable access
+        # one forward, all hidden states
+        print(f"[encode_dinov2_image_emb DEBUG] Calling stored HF DINOv2 model {type(hf_vit)} with output_hidden_states=True")
+        outs = hf_vit(pixel_values=dinov2_image,
+                      output_hidden_states=True,
+                      return_dict=True) # Use return_dict for reliable access
+                      
+        if not hasattr(outs, "hidden_states") or outs.hidden_states is None:
+             raise ValueError(f"HF DINOv2 model did not return 'hidden_states'. Output type: {type(outs)}")
+        hid = outs.hidden_states
+        print(f"[encode_dinov2_image_emb DEBUG] Total hidden states returned: {len(hid)}")
 
-        if not hasattr(outputs, "hidden_states") or outputs.hidden_states is None:
-             raise ValueError(f"HF DINOv2 model did not return 'hidden_states'. Output type: {type(outputs)}")
-        hidden = outputs.hidden_states
-        print(f"[encode_dinov2_image_emb DEBUG] Total hidden states returned: {len(hidden)}")
-
-        # deep features (last layer, drop CLS)
-        deep = hidden[-1][:, 1:, :]
-
+        deep    = hid[-1][:, 1:, :]     # last layer, drop CLS
+        
         # shallow features (layers 9, 19, 29, drop CLS, concat along features)
         dinov2_shallow_layer_indices = [9, 19, 29] # As per original code
         shallow_feats_list = []
         for i in dinov2_shallow_layer_indices:
-            if i >= len(hidden):
-                 print(f"[encode_dinov2_image_emb WARNING] DINOv2 shallow layer index {i} is out of bounds (max: {len(hidden)-1}). Skipping layer.")
+            if i >= len(hid):
+                 print(f"[encode_dinov2_image_emb WARNING] DINOv2 shallow layer index {i} is out of bounds (max: {len(hid)-1}). Skipping layer.")
                  continue # Skip this layer index if out of bounds
-            shallow_feats_list.append(hidden[i][:, 1:, :])
+            shallow_feats_list.append(hid[i][:, 1:, :])
 
         if not shallow_feats_list:
              raise ValueError("No valid shallow layers were selected for DINOv2. Check indices and model depth.")
-
-        shallow = torch.cat(shallow_feats_list, dim=-1)
-
+             
+        shallow = torch.cat(shallow_feats_list, dim=-1) # Concatenate along feature dim
+        
         print(f"[encode_dinov2_image_emb DEBUG] Deep features shape: {deep.shape}")
         print(f"[encode_dinov2_image_emb DEBUG] Shallow features shape: {shallow.shape}")
-
+        
         return deep, shallow
 
     @torch.inference_mode()
@@ -410,8 +345,13 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
         ]
         # nb_split_image = len(object_image_pil_high_res_crops) # Not strictly needed with current loop
 
-        siglip_low_res_pixels = self._comfy_clip_vision_preprocess_pil(self.siglip_image_processor, object_image_pil_low_res)
-        dinov2_low_res_pixels = self._comfy_clip_vision_preprocess_pil(self.dinov2_image_processor, object_image_pil_low_res)
+        if self.siglip_hf_processor is None:
+            raise ValueError("SigLIP Hugging Face processor is not initialized.")
+        if self.dinov2_hf_processor is None:
+            raise ValueError("DINOv2 Hugging Face processor is not initialized.")
+
+        siglip_low_res_pixels = self._hf_preprocess_pil(self.siglip_hf_processor, object_image_pil_low_res)
+        dinov2_low_res_pixels = self._hf_preprocess_pil(self.dinov2_hf_processor, object_image_pil_low_res)
 
         siglip_deep_low, siglip_shallow_low = self.encode_siglip_image_emb(siglip_low_res_pixels, device, dtype)
         dinov2_deep_low, dinov2_shallow_low = self.encode_dinov2_image_emb(dinov2_low_res_pixels, device, dtype)
@@ -440,8 +380,8 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
         all_dinov2_high_res_deep_patches = []
 
         for crop_pil in object_image_pil_high_res_crops:
-            siglip_patch_pixels = self._comfy_clip_vision_preprocess_pil(self.siglip_image_processor, crop_pil)
-            dinov2_patch_pixels = self._comfy_clip_vision_preprocess_pil(self.dinov2_image_processor, crop_pil)
+            siglip_patch_pixels = self._hf_preprocess_pil(self.siglip_hf_processor, crop_pil)
+            dinov2_patch_pixels = self._hf_preprocess_pil(self.dinov2_hf_processor, crop_pil)
 
             siglip_deep_patch, _ = self.encode_siglip_image_emb(siglip_patch_pixels, device, dtype) # Ignore shallow
             dinov2_deep_patch, _ = self.encode_dinov2_image_emb(dinov2_patch_pixels, device, dtype) # Ignore shallow

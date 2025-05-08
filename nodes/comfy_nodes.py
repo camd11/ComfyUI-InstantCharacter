@@ -4,6 +4,7 @@ import torch
 import folder_paths
 from PIL import Image
 import numpy as np
+from transformers import AutoProcessor, AutoModel
 
 # Add the parent directory to the Python path so we can import
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -26,8 +27,8 @@ class InstantCharacterLoader:
                 "flux_text_encoder_one": ("CLIP", {}), # Expects composite CLIP (CLIP-L + T5XXL) OR just CLIP-L
                 "flux_text_encoder_two": ("CLIP", {}), # Expects T5XXL CLIP object
                 "flux_vae": ("VAE", {}),
-                "siglip_vision_model": ("CLIP_VISION", {}),
-                "dinov2_vision_model": ("CLIP_VISION", {}),
+                "siglip_model_name_or_path": ("STRING", {"default": "google/siglip-base-patch16-384"}),
+                "dinov2_model_name_or_path": ("STRING", {"default": "facebook/dinov2-base"}),
                 "ipadapter_model_data": ("IPADAPTER", {}),
                 "sampler": ("SAMPLER", ), # Added SAMPLER input
                 "cpu_offload": ("BOOLEAN", {"default": False}),
@@ -44,129 +45,145 @@ class InstantCharacterLoader:
                               flux_text_encoder_one, # Should be CLIP-L part
                               flux_text_encoder_two, # Add argument for the second encoder (T5XXL part)
                               flux_vae,
-                              siglip_vision_model,
-                              dinov2_vision_model,
+                              siglip_model_name_or_path, # Changed from siglip_vision_model
+                              dinov2_model_name_or_path, # Changed from dinov2_vision_model
                               ipadapter_model_data,
                               sampler, # Added sampler argument
                               cpu_offload,
                              ):
 
-        # Validate ipadapter_model_data structure (remains important)
-        if not isinstance(ipadapter_model_data, dict) or \
-           "ip_adapter" not in ipadapter_model_data or \
-           "image_proj" not in ipadapter_model_data:
-            raise ValueError(
-                "IPAdapter model data is not in the expected dictionary format "
-                "with 'ip_adapter' and 'image_proj' keys containing state_dicts."
-            )
+       # Validate ipadapter_model_data structure (remains important)
+       if not isinstance(ipadapter_model_data, dict) or \
+          "ip_adapter" not in ipadapter_model_data or \
+          "image_proj" not in ipadapter_model_data:
+           raise ValueError(
+               "IPAdapter model data is not in the expected dictionary format "
+               "with 'ip_adapter' and 'image_proj' keys containing state_dicts."
+           )
 
-        # Extract underlying nn.Module components
-        actual_unet = flux_unet_model.model
-        actual_vae = flux_vae.first_stage_model # Preserved from original block
+       # Extract underlying nn.Module components
+       actual_unet = flux_unet_model.model
+       actual_vae = flux_vae.first_stage_model # Preserved from original block
 
-        # Logic to extract components from potentially separate CLIP objects
-        
-        text_encoder_1_module = None
-        tokenizer_1_instance = None
-        text_encoder_2_module = None
-        tokenizer_2_instance = None
+       # Logic to extract components from potentially separate CLIP objects
+       
+       text_encoder_1_module = None
+       tokenizer_1_instance = None
+       text_encoder_2_module = None
+       tokenizer_2_instance = None
 
-        # --- Process Encoder 1 (Expected: CLIP-L) ---
-        if flux_text_encoder_one:
-            # Assume flux_text_encoder_one directly provides CLIP-L components
-            if hasattr(flux_text_encoder_one, 'tokenizer'):
-                 # If it's composite, try getting clip_l, else assume it IS clip_l tokenizer
-                if hasattr(flux_text_encoder_one.tokenizer, 'clip_l'):
-                    tokenizer_1_instance = flux_text_encoder_one.tokenizer.clip_l
-                else: # Assume flux_text_encoder_one.tokenizer *is* the CLIP-L tokenizer
-                    tokenizer_1_instance = flux_text_encoder_one.tokenizer
-                    print("InstantCharacterLoader: Assuming flux_text_encoder_one.tokenizer is CLIP-L tokenizer.")
-            else:
-                 print("InstantCharacterLoader WARNING: flux_text_encoder_one missing 'tokenizer' attribute.")
+       # --- Process Encoder 1 (Expected: CLIP-L) ---
+       if flux_text_encoder_one:
+           # Assume flux_text_encoder_one directly provides CLIP-L components
+           if hasattr(flux_text_encoder_one, 'tokenizer'):
+                # If it's composite, try getting clip_l, else assume it IS clip_l tokenizer
+               if hasattr(flux_text_encoder_one.tokenizer, 'clip_l'):
+                   tokenizer_1_instance = flux_text_encoder_one.tokenizer.clip_l
+               else: # Assume flux_text_encoder_one.tokenizer *is* the CLIP-L tokenizer
+                   tokenizer_1_instance = flux_text_encoder_one.tokenizer
+                   print("InstantCharacterLoader: Assuming flux_text_encoder_one.tokenizer is CLIP-L tokenizer.")
+           else:
+                print("InstantCharacterLoader WARNING: flux_text_encoder_one missing 'tokenizer' attribute.")
 
-            if hasattr(flux_text_encoder_one, 'cond_stage_model'):
-                 # If it's composite, try getting clip_l, else assume it IS clip_l encoder
-                if hasattr(flux_text_encoder_one.cond_stage_model, 'clip_l'):
-                    text_encoder_1_module = flux_text_encoder_one.cond_stage_model.clip_l
-                else: # Assume flux_text_encoder_one.cond_stage_model *is* the CLIP-L encoder
-                    text_encoder_1_module = flux_text_encoder_one.cond_stage_model
-                    print("InstantCharacterLoader: Assuming flux_text_encoder_one.cond_stage_model is CLIP-L encoder.")
-            else:
-                 print("InstantCharacterLoader WARNING: flux_text_encoder_one missing 'cond_stage_model' attribute.")
-        else:
-             print("InstantCharacterLoader WARNING: flux_text_encoder_one is None.")
+           if hasattr(flux_text_encoder_one, 'cond_stage_model'):
+                # If it's composite, try getting clip_l, else assume it IS clip_l encoder
+               if hasattr(flux_text_encoder_one.cond_stage_model, 'clip_l'):
+                   text_encoder_1_module = flux_text_encoder_one.cond_stage_model.clip_l
+               else: # Assume flux_text_encoder_one.cond_stage_model *is* the CLIP-L encoder
+                   text_encoder_1_module = flux_text_encoder_one.cond_stage_model
+                   print("InstantCharacterLoader: Assuming flux_text_encoder_one.cond_stage_model is CLIP-L encoder.")
+           else:
+                print("InstantCharacterLoader WARNING: flux_text_encoder_one missing 'cond_stage_model' attribute.")
+       else:
+            print("InstantCharacterLoader WARNING: flux_text_encoder_one is None.")
 
 
-        # --- Process Encoder 2 (Expected: T5XXL) ---
-        if flux_text_encoder_two:
-            # Assume flux_text_encoder_two directly provides T5XXL components
-            if hasattr(flux_text_encoder_two, 'tokenizer'):
-                 # If it's composite, try getting t5xxl, else assume it IS t5xxl tokenizer
-                if hasattr(flux_text_encoder_two.tokenizer, 't5xxl'):
-                     tokenizer_2_instance = flux_text_encoder_two.tokenizer.t5xxl
-                else: # Assume flux_text_encoder_two.tokenizer *is* the T5XXL tokenizer
-                    tokenizer_2_instance = flux_text_encoder_two.tokenizer
-                    print("InstantCharacterLoader: Assuming flux_text_encoder_two.tokenizer is T5XXL tokenizer.")
-            else:
-                 print("InstantCharacterLoader WARNING: flux_text_encoder_two missing 'tokenizer' attribute.")
+       # --- Process Encoder 2 (Expected: T5XXL) ---
+       if flux_text_encoder_two:
+           # Assume flux_text_encoder_two directly provides T5XXL components
+           if hasattr(flux_text_encoder_two, 'tokenizer'):
+                # If it's composite, try getting t5xxl, else assume it IS t5xxl tokenizer
+               if hasattr(flux_text_encoder_two.tokenizer, 't5xxl'):
+                    tokenizer_2_instance = flux_text_encoder_two.tokenizer.t5xxl
+               else: # Assume flux_text_encoder_two.tokenizer *is* the T5XXL tokenizer
+                   tokenizer_2_instance = flux_text_encoder_two.tokenizer
+                   print("InstantCharacterLoader: Assuming flux_text_encoder_two.tokenizer is T5XXL tokenizer.")
+           else:
+                print("InstantCharacterLoader WARNING: flux_text_encoder_two missing 'tokenizer' attribute.")
 
-            if hasattr(flux_text_encoder_two, 'cond_stage_model'):
-                 # If it's composite, try getting t5xxl, else assume it IS t5xxl encoder
-                if hasattr(flux_text_encoder_two.cond_stage_model, 't5xxl'):
-                    text_encoder_2_module = flux_text_encoder_two.cond_stage_model.t5xxl
-                else: # Assume flux_text_encoder_two.cond_stage_model *is* the T5XXL encoder
-                    text_encoder_2_module = flux_text_encoder_two.cond_stage_model
-                    print("InstantCharacterLoader: Assuming flux_text_encoder_two.cond_stage_model is T5XXL encoder.")
-            else:
-                 print("InstantCharacterLoader WARNING: flux_text_encoder_two missing 'cond_stage_model' attribute.")
-        else:
-             print("InstantCharacterLoader WARNING: flux_text_encoder_two is None.")
+           if hasattr(flux_text_encoder_two, 'cond_stage_model'):
+                # If it's composite, try getting t5xxl, else assume it IS t5xxl encoder
+               if hasattr(flux_text_encoder_two.cond_stage_model, 't5xxl'):
+                   text_encoder_2_module = flux_text_encoder_two.cond_stage_model.t5xxl
+               else: # Assume flux_text_encoder_two.cond_stage_model *is* the T5XXL encoder
+                   text_encoder_2_module = flux_text_encoder_two.cond_stage_model
+                   print("InstantCharacterLoader: Assuming flux_text_encoder_two.cond_stage_model is T5XXL encoder.")
+           else:
+                print("InstantCharacterLoader WARNING: flux_text_encoder_two missing 'cond_stage_model' attribute.")
+       else:
+            print("InstantCharacterLoader WARNING: flux_text_encoder_two is None.")
 
-        # --- Final Checks ---
-        if text_encoder_1_module is None or tokenizer_1_instance is None:
-             print("InstantCharacterLoader WARNING: Failed to extract Text Encoder 1 or Tokenizer 1.")
-        if text_encoder_2_module is None or tokenizer_2_instance is None:
-             print("InstantCharacterLoader WARNING: Failed to extract Text Encoder 2 or Tokenizer 2.")
-        
-        # Attach the extracted (or None) components to the flux_unet_model object.
-        # The pipeline (InstantCharacterFluxPipeline) expects to find these attributes on flux_unet_model.
-        if flux_unet_model:
-            flux_unet_model.text_encoder_1 = text_encoder_1_module
-            flux_unet_model.tokenizer_1 = tokenizer_1_instance
-            flux_unet_model.text_encoder_2 = text_encoder_2_module
-            flux_unet_model.tokenizer_2 = tokenizer_2_instance
-            print("InstantCharacterLoader: Assigned extracted/default text encoders and tokenizers to flux_unet_model.")
-        else:
-            # This case should ideally be prevented by ComfyUI's input validation if MODEL is required.
-            print("InstantCharacterLoader WARNING: flux_unet_model is None. Cannot attach text encoder/tokenizer components.")
-        
-        pipe = InstantCharacterFluxPipeline(
-            flux_unet_model_object=flux_unet_model, # Now contains text_encoders/tokenizers
-            vae_module=actual_vae,
-            siglip_vision_model_object=siglip_vision_model,
-            dinov2_vision_model_object=dinov2_vision_model,
-            ipadapter_model_data_dict=ipadapter_model_data,
-            sampler_object=sampler # Pass sampler to pipeline
-            # dtype is handled by the pipeline's __init__
-        )
+       # --- Final Checks ---
+       if text_encoder_1_module is None or tokenizer_1_instance is None:
+            print("InstantCharacterLoader WARNING: Failed to extract Text Encoder 1 or Tokenizer 1.")
+       if text_encoder_2_module is None or tokenizer_2_instance is None:
+            print("InstantCharacterLoader WARNING: Failed to extract Text Encoder 2 or Tokenizer 2.")
+       
+       # Attach the extracted (or None) components to the flux_unet_model object.
+       # The pipeline (InstantCharacterFluxPipeline) expects to find these attributes on flux_unet_model.
+       if flux_unet_model:
+           flux_unet_model.text_encoder_1 = text_encoder_1_module
+           flux_unet_model.tokenizer_1 = tokenizer_1_instance
+           flux_unet_model.text_encoder_2 = text_encoder_2_module
+           flux_unet_model.tokenizer_2 = tokenizer_2_instance
+           print("InstantCharacterLoader: Assigned extracted/default text encoders and tokenizers to flux_unet_model.")
+       else:
+           # This case should ideally be prevented by ComfyUI's input validation if MODEL is required.
+           print("InstantCharacterLoader WARNING: flux_unet_model is None. Cannot attach text encoder/tokenizer components.")
 
-        # CPU Offload:
-        # ComfyUI's model management handles device placement for input MODEL, CLIP_VISION.
-        # The pipeline initializes its new components (attn_procs, image_proj) on the device
-        # of the input UNet. If specific offloading methods were on the pipeline (like Diffusers),
-        # they could be called here. For now, we rely on ComfyUI's management of input models.
-        if cpu_offload:
-            print("InstantCharacter: CPU offload requested for input models is managed by ComfyUI loaders.")
-            print("InstantCharacterPipeline initializes its internal components on the UNet's device.")
-            # If `pipe` had a method like `pipe.enable_sequential_cpu_offload()` and it was desired:
-            # try:
-            #     pipe.enable_sequential_cpu_offload()
-            #     print("InstantCharacterPipeline: Attempted sequential CPU offload.")
-            # except AttributeError:
-            #     print("InstantCharacterPipeline: Does not have enable_sequential_cpu_offload method.")
-            pass # Primary offload is via ComfyUI's handling of the input model objects
+       # Load SigLIP and DINOv2 models and processors using transformers
+       print(f"InstantCharacterLoader: Loading SigLIP model from: {siglip_model_name_or_path}")
+       siglip_processor = AutoProcessor.from_pretrained(siglip_model_name_or_path)
+       siglip_hf_model = AutoModel.from_pretrained(siglip_model_name_or_path)
+       print(f"InstantCharacterLoader: SigLIP model loaded: {type(siglip_hf_model)}")
 
-        return (pipe,)
+       print(f"InstantCharacterLoader: Loading DINOv2 model from: {dinov2_model_name_or_path}")
+       dinov2_processor = AutoProcessor.from_pretrained(dinov2_model_name_or_path)
+       dinov2_hf_model = AutoModel.from_pretrained(dinov2_model_name_or_path)
+       print(f"InstantCharacterLoader: DINOv2 model loaded: {type(dinov2_hf_model)}")
+       
+       pipe = InstantCharacterFluxPipeline(
+           flux_unet_model_object=flux_unet_model, # Now contains text_encoders/tokenizers
+           vae_module=actual_vae,
+           siglip_hf_processor=siglip_processor, # Pass loaded HF processor
+           siglip_hf_model=siglip_hf_model,       # Pass loaded HF model
+           dinov2_hf_processor=dinov2_processor, # Pass loaded HF processor
+           dinov2_hf_model=dinov2_hf_model,       # Pass loaded HF model
+           ipadapter_model_data_dict=ipadapter_model_data,
+           sampler_object=sampler # Pass sampler to pipeline
+           # dtype is handled by the pipeline's __init__
+       )
+
+       # CPU Offload:
+       # ComfyUI's model management handles device placement for input MODEL.
+       # The Hugging Face models (SigLIP, DINOv2) loaded here will be on the default device (usually CPU)
+       # or GPU if CUDA is available and transformers decides so.
+       # The pipeline will move them to the UNet's device during its initialization.
+       # The pipeline initializes its new components (attn_procs, image_proj) on the device
+       # of the input UNet.
+       if cpu_offload:
+           print("InstantCharacter: CPU offload for input ComfyUI models (UNet, VAE, CLIPs) is managed by their respective loaders.")
+           print("InstantCharacter: For Hugging Face models (SigLIP, DINOv2), they are loaded by transformers and then moved to the UNet's device by the pipeline.")
+           # If the pipeline itself had an explicit offload mechanism for its components, it could be called here.
+           # For example, if pipe.enable_model_cpu_offload() existed:
+           # try:
+           #     pipe.enable_model_cpu_offload() # This would be a Diffusers-like method
+           #     print("InstantCharacterPipeline: Attempted model CPU offload on the pipeline.")
+           # except AttributeError:
+           #     print("InstantCharacterPipeline: Does not have a direct CPU offload method. Relies on component device placement.")
+           pass
+
+       return (pipe,)
 
 
 class InstantCharacterGenerate:
