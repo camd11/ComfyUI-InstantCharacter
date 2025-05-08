@@ -273,30 +273,31 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
         if self.siglip_image_encoder_model is None:
             raise ValueError("SigLIP image encoder model is not initialized.")
         
-        clip_vision_object = self.siglip_image_encoder_model.vision_model # This is comfy.clip_model.CLIPVision
+        # self.siglip_image_encoder_model is comfy.clip_model.CLIPVisionModel
+        # self.siglip_image_encoder_model.vision_model is comfy.clip_model.CLIPVision
+        # self.siglip_image_encoder_model.vision_model.vision_model is the HF VisionTransformer
+        actual_hf_model = self.siglip_image_encoder_model.vision_model.vision_model
+        
         try:
-            # Get device/dtype from the underlying HF model wrapped by CLIPVision
-            model_device = next(clip_vision_object.vision_model.parameters()).device
-            model_dtype = next(clip_vision_object.vision_model.parameters()).dtype
-            model_dtype = next(encoder_model_to_use.parameters()).dtype
+            model_device = next(actual_hf_model.parameters()).device
+            model_dtype = next(actual_hf_model.parameters()).dtype
         except StopIteration:
-            print("[encode_siglip_image_emb WARNING] encoder_model_to_use has no parameters. Using input device/dtype.")
+            print("[encode_siglip_image_emb WARNING] actual_hf_model has no parameters. Using input device/dtype.")
             model_device = device
             model_dtype = dtype
         except AttributeError:
-            print("[encode_siglip_image_emb WARNING] Could not get parameters from encoder_model_to_use. Using input device/dtype.")
+            print("[encode_siglip_image_emb WARNING] Could not get parameters from actual_hf_model. Using input device/dtype.")
             model_device = device
             model_dtype = dtype
 
-        # Ensure the underlying HF model is on the correct device/dtype
-        clip_vision_object.vision_model.to(device=model_device, dtype=model_dtype)
+        actual_hf_model.config.output_hidden_states = True # Ensure hidden states are returned
+        actual_hf_model.to(device=model_device, dtype=model_dtype)
         
-        print(f"[encode_siglip_image_emb DEBUG] Calling {type(clip_vision_object)}.get_image_features with output_hidden_states=True")
-        # Call get_image_features directly
-        res = clip_vision_object.get_image_features(
+        print(f"[encode_siglip_image_emb DEBUG] Calling actual_hf_model ({type(actual_hf_model)}) with output_hidden_states=True")
+        res = actual_hf_model(
             pixel_values=siglip_pixel_values.to(device=model_device, dtype=model_dtype),
-            output_hidden_states=True,
-            return_dict=True # Ensure we get a BaseModelOutputWithPooling-like object
+            output_hidden_states=True, # Explicitly pass again, though config should handle it
+            return_dict=True
         )
 
         if not hasattr(res, 'last_hidden_state') or not hasattr(res, 'hidden_states'):
@@ -334,30 +335,31 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
         if self.dinov2_image_encoder_model is None:
             raise ValueError("DINOv2 image encoder model is not initialized.")
 
-        clip_vision_object = self.dinov2_image_encoder_model.vision_model # This is comfy.clip_model.CLIPVision
+        # self.dinov2_image_encoder_model is comfy.clip_model.CLIPVisionModel
+        # self.dinov2_image_encoder_model.vision_model is comfy.clip_model.CLIPVision
+        # self.dinov2_image_encoder_model.vision_model.vision_model is the HF VisionTransformer
+        actual_hf_model = self.dinov2_image_encoder_model.vision_model.vision_model
+
         try:
-            # Get device/dtype from the underlying HF model wrapped by CLIPVision
-            model_device = next(clip_vision_object.vision_model.parameters()).device
-            model_dtype = next(clip_vision_object.vision_model.parameters()).dtype
-            model_dtype = next(encoder_model_to_use.parameters()).dtype
+            model_device = next(actual_hf_model.parameters()).device
+            model_dtype = next(actual_hf_model.parameters()).dtype
         except StopIteration:
-            print("[encode_dinov2_image_emb WARNING] encoder_model_to_use has no parameters. Using input device/dtype.")
+            print("[encode_dinov2_image_emb WARNING] actual_hf_model has no parameters. Using input device/dtype.")
             model_device = device
             model_dtype = dtype
         except AttributeError:
-            print("[encode_dinov2_image_emb WARNING] Could not get parameters from encoder_model_to_use. Using input device/dtype.")
+            print("[encode_dinov2_image_emb WARNING] Could not get parameters from actual_hf_model. Using input device/dtype.")
             model_device = device
             model_dtype = dtype
             
-        # Ensure the underlying HF model is on the correct device/dtype
-        clip_vision_object.vision_model.to(device=model_device, dtype=model_dtype)
+        actual_hf_model.config.output_hidden_states = True # Ensure hidden states are returned
+        actual_hf_model.to(device=model_device, dtype=model_dtype)
 
-        print(f"[encode_dinov2_image_emb DEBUG] Calling {type(clip_vision_object)}.get_image_features with output_hidden_states=True")
-        # Call get_image_features directly
-        res = clip_vision_object.get_image_features(
+        print(f"[encode_dinov2_image_emb DEBUG] Calling actual_hf_model ({type(actual_hf_model)}) with output_hidden_states=True")
+        res = actual_hf_model(
             pixel_values=dinov2_pixel_values.to(device=model_device, dtype=model_dtype),
-            output_hidden_states=True,
-            return_dict=True # Ensure we get a BaseModelOutputWithPooling-like object
+            output_hidden_states=True, # Explicitly pass again, though config should handle it
+            return_dict=True
         )
 
         if not hasattr(res, 'last_hidden_state') or not hasattr(res, 'hidden_states'):
