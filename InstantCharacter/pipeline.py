@@ -108,29 +108,21 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
 
         # Assign Image Encoders from CLIP_VISION objects
         # Assign Image Encoders from CLIP_VISION objects
-        self.siglip_image_processor = siglip_vision_model_object # This is the wrapper, passed to _comfy_clip_vision_preprocess_pil
-        if siglip_vision_model_object is not None and hasattr(siglip_vision_model_object, 'model'):
-            self.siglip_image_encoder_model = siglip_vision_model_object.model # This is the actual nn.Module for encoding
-            print("InstantCharacterPipeline: Assigned self.siglip_image_encoder_model from siglip_vision_model_object.model.")
-        elif siglip_vision_model_object is not None:
-            # Fallback if .model is not present, but the object itself might be the encoder.
-            # This is less likely for ComfyUI CLIP_VISION wrappers which usually encapsulate a model.
-            print("Warning: siglip_vision_model_object.model not found. Attempting to use siglip_vision_model_object directly as siglip_image_encoder_model.")
-            self.siglip_image_encoder_model = siglip_vision_model_object
+        # Store the complete ComfyUI CLIP_VISION wrapper objects
+        self.siglip_image_processor = siglip_vision_model_object # Used for preprocessing attributes
+        self.siglip_image_encoder_model = siglip_vision_model_object # Store the whole wrapper
+        if self.siglip_image_encoder_model is None:
+             print("Warning: siglip_vision_model_object is None.")
         else:
-            self.siglip_image_encoder_model = None
-            print("Warning: siglip_vision_model_object is None. self.siglip_image_encoder_model set to None.")
+             print(f"InstantCharacterPipeline: Assigned self.siglip_image_encoder_model (type: {type(self.siglip_image_encoder_model)}).")
 
-        self.dinov2_image_processor = dinov2_vision_model_object # This is the wrapper
-        if dinov2_vision_model_object is not None and hasattr(dinov2_vision_model_object, 'model'):
-            self.dinov2_image_encoder_model = dinov2_vision_model_object.model # Actual nn.Module
-            print("InstantCharacterPipeline: Assigned self.dinov2_image_encoder_model from dinov2_vision_model_object.model.")
-        elif dinov2_vision_model_object is not None:
-            print("Warning: dinov2_vision_model_object.model not found. Attempting to use dinov2_vision_model_object directly as dinov2_image_encoder_model.")
-            self.dinov2_image_encoder_model = dinov2_vision_model_object
+
+        self.dinov2_image_processor = dinov2_vision_model_object # Used for preprocessing attributes
+        self.dinov2_image_encoder_model = dinov2_vision_model_object # Store the whole wrapper
+        if self.dinov2_image_encoder_model is None:
+             print("Warning: dinov2_vision_model_object is None.")
         else:
-            self.dinov2_image_encoder_model = None
-            print("Warning: dinov2_vision_model_object is None. self.dinov2_image_encoder_model set to None.")
+             print(f"InstantCharacterPipeline: Assigned self.dinov2_image_encoder_model (type: {type(self.dinov2_image_encoder_model)}).")
 
         self._initialize_ip_adapter_components(ipadapter_model_data_dict, self.dtype)
 
@@ -268,126 +260,124 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
 
         return pixel_values.to(device=self.device, dtype=self.dtype)
 
+    def _get_hf_backbone(self, wrapper):
+        """
+        ComfyUI wraps a Hugging-Face vision transformer in different
+        attributes depending on the loader version.
+        Returns the HF model or raises AttributeError.
+        """
+        # Check common attributes where the HF model might be stored
+        for attr in ("vision_model", "model", "clip_model"):
+            if hasattr(wrapper, attr):
+                potential_model = getattr(wrapper, attr)
+                # Check if the attribute itself is the HF model (common case)
+                # A simple check: does it have a 'config' attribute typical of HF models?
+                if hasattr(potential_model, 'config') and callable(potential_model):
+                     print(f"[_get_hf_backbone DEBUG] Found HF model in wrapper attribute: '{attr}'")
+                     return potential_model
+                # Check if it's nested one level deeper (e.g., wrapper.vision_model.vision_model)
+                # This handles cases like CLIPVisionModelProjection containing CLIPVision containing HF model
+                if hasattr(potential_model, attr):
+                     nested_model = getattr(potential_model, attr)
+                     if hasattr(nested_model, 'config') and callable(nested_model):
+                          print(f"[_get_hf_backbone DEBUG] Found HF model in nested wrapper attribute: '{attr}.{attr}'")
+                          return nested_model
+
+        # If no common attribute path worked, raise an error
+        raise AttributeError(
+            f"Cannot locate HF backbone in {type(wrapper)}. "
+            f"Checked attributes: vision_model, model, clip_model (and nested versions)."
+        )
+
+
     @torch.inference_mode()
-    def encode_siglip_image_emb(self, siglip_pixel_values, device, dtype):
+    def encode_siglip_image_emb(self, siglip_image, device, dtype):
+        """Encodes SigLIP image and extracts deep/shallow features using the underlying HF model."""
         if self.siglip_image_encoder_model is None:
-            raise ValueError("SigLIP image encoder model is not initialized.")
-        
-        # self.siglip_image_encoder_model is comfy.clip_model.CLIPVisionModel
-        # self.siglip_image_encoder_model.vision_model is comfy.clip_model.CLIPVision
-        # self.siglip_image_encoder_model.vision_model.vision_model is the HF VisionTransformer
-        actual_hf_model = self.siglip_image_encoder_model.vision_model.vision_model
-        
-        try:
-            model_device = next(actual_hf_model.parameters()).device
-            model_dtype = next(actual_hf_model.parameters()).dtype
-        except StopIteration:
-            print("[encode_siglip_image_emb WARNING] actual_hf_model has no parameters. Using input device/dtype.")
-            model_device = device
-            model_dtype = dtype
-        except AttributeError:
-            print("[encode_siglip_image_emb WARNING] Could not get parameters from actual_hf_model. Using input device/dtype.")
-            model_device = device
-            model_dtype = dtype
+            raise ValueError("SigLIP image encoder model wrapper is not initialized.")
 
-        actual_hf_model.config.output_hidden_states = True # Ensure hidden states are returned
-        actual_hf_model.to(device=model_device, dtype=model_dtype)
-        
-        print(f"[encode_siglip_image_emb DEBUG] Calling actual_hf_model ({type(actual_hf_model)}) with output_hidden_states=True")
-        res = actual_hf_model(
-            pixel_values=siglip_pixel_values.to(device=model_device, dtype=model_dtype),
-            output_hidden_states=True, # Explicitly pass again, though config should handle it
-            return_dict=True
-        )
+        siglip_image = siglip_image.to(device=device, dtype=dtype)
 
-        if not hasattr(res, 'last_hidden_state') or not hasattr(res, 'hidden_states'):
-            raise ValueError(
-                f"Unexpected output from SigLIP model. Expected 'last_hidden_state' and 'hidden_states'. Got: {type(res)}"
-            )
+        # Use helper to get the actual HF model, handling wrapper inconsistencies
+        hf_model = self._get_hf_backbone(self.siglip_image_encoder_model)
+        hf_model.to(device=device, dtype=dtype) # Ensure device/dtype
 
-        siglip_deep_features = res.last_hidden_state[:, 1:]
+        # single forward with every hidden state
+        print(f"[encode_siglip_image_emb DEBUG] Calling HF model {type(hf_model)} with output_hidden_states=True")
+        outputs = hf_model(pixel_values=siglip_image,
+                           output_hidden_states=True,
+                           return_dict=True) # Use return_dict for reliable access
 
-        # SigLIP ViT-SO400M-Patch14-384 has 27 layers. hidden_states tuple has 28 elements (embeddings + 27 layers).
-        # Indices 7, 13, 26 are valid if 0-indexed into the tuple of (embeddings, layer1_out, layer2_out, ...).
-        # HF `hidden_states` includes initial embeddings as hidden_states[0], then layer_1_output as hidden_states[1], etc.
-        # So, output of "layer N" is at `res.hidden_states[N]`.
-        # The prompt's indices 7, 13, 26 likely refer to these direct tuple indices.
+        if not hasattr(outputs, "hidden_states") or outputs.hidden_states is None:
+             raise ValueError(f"HF SigLIP model did not return 'hidden_states'. Output type: {type(outputs)}")
+        hidden = outputs.hidden_states  # tuple (embeddings + per-layer)
+        print(f"[encode_siglip_image_emb DEBUG] Total hidden states returned: {len(hidden)}")
+
+        # deep features (last layer, drop CLS)
+        deep = hidden[-1][:, 1:, :]
+
+        # shallow features (layers 7, 13, 26, drop CLS, concat along features)
         siglip_shallow_layer_indices = [7, 13, 26]
-        
-        selected_shallow_layers = []
-        for layer_idx in siglip_shallow_layer_indices:
-            if layer_idx < len(res.hidden_states):
-                layer_output = res.hidden_states[layer_idx]
-                selected_shallow_layers.append(layer_output[:, 1:]) # Strip CLS
-            else:
-                raise ValueError(f"SigLIP shallow layer index {layer_idx} is out of bounds. "
-                                 f"Model has {len(res.hidden_states)-1} layers (output tuple length {len(res.hidden_states)} including embeddings). Max index: {len(res.hidden_states)-1}")
-        
-        if not selected_shallow_layers:
-            raise ValueError("No shallow layers were selected for SigLIP. Check indices.")
-            
-        siglip_shallow_features = torch.cat(selected_shallow_layers, dim=1)
+        shallow_feats_list = []
+        for i in siglip_shallow_layer_indices:
+            if i >= len(hidden):
+                 raise ValueError(f"SigLIP shallow layer index {i} is out of bounds. Max index: {len(hidden)-1}")
+            shallow_feats_list.append(hidden[i][:, 1:, :])
 
-        return siglip_deep_features, siglip_shallow_features
+        if not shallow_feats_list:
+             raise ValueError("No shallow layers were selected for SigLIP. Check indices.")
+
+        shallow = torch.cat(shallow_feats_list, dim=-1)
+
+        print(f"[encode_siglip_image_emb DEBUG] Deep features shape: {deep.shape}")
+        print(f"[encode_siglip_image_emb DEBUG] Shallow features shape: {shallow.shape}")
+
+        return deep, shallow
 
     @torch.inference_mode()
-    def encode_dinov2_image_emb(self, dinov2_pixel_values, device, dtype):
+    def encode_dinov2_image_emb(self, dinov2_image, device, dtype):
+        """Encodes DINOv2 image and extracts deep/shallow features using the underlying HF model."""
         if self.dinov2_image_encoder_model is None:
-            raise ValueError("DINOv2 image encoder model is not initialized.")
+            raise ValueError("DINOv2 image encoder model wrapper is not initialized.")
 
-        # self.dinov2_image_encoder_model is comfy.clip_model.CLIPVisionModel
-        # self.dinov2_image_encoder_model.vision_model is comfy.clip_model.CLIPVision
-        # self.dinov2_image_encoder_model.vision_model.vision_model is the HF VisionTransformer
-        actual_hf_model = self.dinov2_image_encoder_model.vision_model.vision_model
+        dinov2_image = dinov2_image.to(device=device, dtype=dtype)
 
-        try:
-            model_device = next(actual_hf_model.parameters()).device
-            model_dtype = next(actual_hf_model.parameters()).dtype
-        except StopIteration:
-            print("[encode_dinov2_image_emb WARNING] actual_hf_model has no parameters. Using input device/dtype.")
-            model_device = device
-            model_dtype = dtype
-        except AttributeError:
-            print("[encode_dinov2_image_emb WARNING] Could not get parameters from actual_hf_model. Using input device/dtype.")
-            model_device = device
-            model_dtype = dtype
-            
-        actual_hf_model.config.output_hidden_states = True # Ensure hidden states are returned
-        actual_hf_model.to(device=model_device, dtype=model_dtype)
+        # Use helper to get the actual HF model
+        hf_model = self._get_hf_backbone(self.dinov2_image_encoder_model)
+        hf_model.to(device=device, dtype=dtype) # Ensure device/dtype
 
-        print(f"[encode_dinov2_image_emb DEBUG] Calling actual_hf_model ({type(actual_hf_model)}) with output_hidden_states=True")
-        res = actual_hf_model(
-            pixel_values=dinov2_pixel_values.to(device=model_device, dtype=model_dtype),
-            output_hidden_states=True, # Explicitly pass again, though config should handle it
-            return_dict=True
-        )
+        # single forward with every hidden state
+        print(f"[encode_dinov2_image_emb DEBUG] Calling HF model {type(hf_model)} with output_hidden_states=True")
+        outputs = hf_model(pixel_values=dinov2_image,
+                           output_hidden_states=True,
+                           return_dict=True) # Use return_dict for reliable access
 
-        if not hasattr(res, 'last_hidden_state') or not hasattr(res, 'hidden_states'):
-            raise ValueError(
-                f"Unexpected output from DINOv2 model. Expected 'last_hidden_state' and 'hidden_states'. Got: {type(res)}"
-            )
+        if not hasattr(outputs, "hidden_states") or outputs.hidden_states is None:
+             raise ValueError(f"HF DINOv2 model did not return 'hidden_states'. Output type: {type(outputs)}")
+        hidden = outputs.hidden_states
+        print(f"[encode_dinov2_image_emb DEBUG] Total hidden states returned: {len(hidden)}")
 
-        dinov2_deep_features = res.last_hidden_state[:, 1:]
+        # deep features (last layer, drop CLS)
+        deep = hidden[-1][:, 1:, :]
 
-        # DINOv2-Giant (ViT-g/14) has 40 layers. hidden_states tuple has 41 elements.
-        # Indices 9, 19, 29 are direct tuple indices.
-        dinov2_shallow_layer_indices = [9, 19, 29]
-        
-        selected_shallow_layers = []
-        for layer_idx in dinov2_shallow_layer_indices:
-            if layer_idx < len(res.hidden_states):
-                layer_output = res.hidden_states[layer_idx]
-                selected_shallow_layers.append(layer_output[:, 1:]) # Strip CLS
-            else:
-                raise ValueError(f"DINOv2 shallow layer index {layer_idx} is out of bounds. "
-                                 f"Model has {len(res.hidden_states)-1} layers (output tuple length {len(res.hidden_states)} including embeddings). Max index: {len(res.hidden_states)-1}")
-        
-        if not selected_shallow_layers:
-            raise ValueError("No shallow layers were selected for DINOv2. Check indices.")
+        # shallow features (layers 9, 19, 29, drop CLS, concat along features)
+        dinov2_shallow_layer_indices = [9, 19, 29] # As per original code
+        shallow_feats_list = []
+        for i in dinov2_shallow_layer_indices:
+            if i >= len(hidden):
+                 print(f"[encode_dinov2_image_emb WARNING] DINOv2 shallow layer index {i} is out of bounds (max: {len(hidden)-1}). Skipping layer.")
+                 continue # Skip this layer index if out of bounds
+            shallow_feats_list.append(hidden[i][:, 1:, :])
 
-        dinov2_shallow_features = torch.cat(selected_shallow_layers, dim=1)
+        if not shallow_feats_list:
+             raise ValueError("No valid shallow layers were selected for DINOv2. Check indices and model depth.")
 
-        return dinov2_deep_features, dinov2_shallow_features
+        shallow = torch.cat(shallow_feats_list, dim=-1)
+
+        print(f"[encode_dinov2_image_emb DEBUG] Deep features shape: {deep.shape}")
+        print(f"[encode_dinov2_image_emb DEBUG] Shallow features shape: {shallow.shape}")
+
+        return deep, shallow
 
     @torch.inference_mode()
     def encode_image_emb(self, subject_image_pil: Image.Image, device, dtype):
