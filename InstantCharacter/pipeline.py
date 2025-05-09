@@ -111,26 +111,45 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
         # Assign SigLIP and DINOv2 models and processors
         self.siglip_vision_model = siglip_vision_model_object
         self.siglip_processor = siglip_processor_object
+        if self.siglip_processor is not None:
+            self.siglip_processor.do_resize = True
+            self.siglip_processor.size = {"height": 378, "width": 378}
+            self.siglip_processor.do_center_crop = False
+            print(f"[InstantCharacterPipeline INFO] Applied SigLIP processor settings: do_resize=True, size={{'height': 378, 'width': 378}}, do_center_crop=False")
+        else:
+            print("[InstantCharacterPipeline WARNING] SigLIP processor is None, cannot apply settings.")
+
         self.dinov2_vision_model = dinov2_vision_model_object
         self.dinov2_processor = dinov2_processor_object
+        if self.dinov2_processor is not None:
+            self.dinov2_processor.do_resize = True
+            self.dinov2_processor.do_center_crop = False
+            self.dinov2_processor.size = {"height": 378, "width": 378}
+            self.dinov2_processor.crop_size = {"height": 378, "width": 378} # Safeguard
+            print(f"[InstantCharacterPipeline INFO] Applied DINOv2 processor settings: do_resize=True, do_center_crop=False, size={{'height': 378, 'width': 378}}, crop_size={{'height': 378, 'width': 378}}")
+        else:
+            print("[InstantCharacterPipeline WARNING] DINOv2 processor is None, cannot apply settings.")
 
-        # Harmonize SigLIP processor image size to match DINOv2 processor
+        # Harmonize SigLIP processor image size to match DINOv2 processor (both should be 378x378 now)
         if self.dinov2_processor is not None and hasattr(self.dinov2_processor, 'size') and \
            self.siglip_processor is not None and hasattr(self.siglip_processor, 'size'):
-            try:
-                target_height = self.dinov2_processor.size["height"]
-                target_width = self.dinov2_processor.size["width"]
-                self.siglip_processor.size["height"] = target_height
-                self.siglip_processor.size["width"] = target_width
-                print(f"[InstantCharacterPipeline INFO] Harmonized SigLIP processor image size to: {self.siglip_processor.size} to match DINOv2 processor.")
-            except KeyError as e:
-                print(f"[InstantCharacterPipeline WARNING] Could not harmonize processor sizes. Missing key in processor.size: {e}")
-            except Exception as e:
-                print(f"[InstantCharacterPipeline WARNING] An unexpected error occurred during processor size harmonization: {e}")
+            # Both are configured to 378x378, so direct assignment is fine, or verify they match.
+            if self.siglip_processor.size["height"] != 378 or self.siglip_processor.size["width"] != 378:
+                print(f"[InstantCharacterPipeline WARNING] SigLIP processor size was not 378x378 before harmonization attempt. Current: {self.siglip_processor.size}. Forcing to 378x378.")
+                self.siglip_processor.size = {"height": 378, "width": 378}
+            if self.dinov2_processor.size["height"] != 378 or self.dinov2_processor.size["width"] != 378:
+                print(f"[InstantCharacterPipeline WARNING] DINOv2 processor size was not 378x378 before harmonization attempt. Current: {self.dinov2_processor.size}. Forcing to 378x378.")
+                self.dinov2_processor.size = {"height": 378, "width": 378}
+                if hasattr(self.dinov2_processor, 'crop_size'):
+                    self.dinov2_processor.crop_size = {"height": 378, "width": 378}
+
+            print(f"[InstantCharacterPipeline INFO] Verified/Harmonized SigLIP processor image size to: {self.siglip_processor.size}")
+            print(f"[InstantCharacterPipeline INFO] Verified/Harmonized DINOv2 processor image size to: {self.dinov2_processor.size}")
+
         elif self.dinov2_processor is None or not hasattr(self.dinov2_processor, 'size'):
-            print("[InstantCharacterPipeline WARNING] DINOv2 processor or its size attribute is not available for harmonization.")
+            print("[InstantCharacterPipeline WARNING] DINOv2 processor or its size attribute is not available for harmonization check.")
         elif self.siglip_processor is None or not hasattr(self.siglip_processor, 'size'):
-            print("[InstantCharacterPipeline WARNING] SigLIP processor or its size attribute is not available for harmonization.")
+            print("[InstantCharacterPipeline WARNING] SigLIP processor or its size attribute is not available for harmonization check.")
 
         if self.siglip_vision_model is None or self.siglip_processor is None:
             print("Warning: SigLIP vision model or processor is None.")
@@ -344,21 +363,27 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
         else:
             raise ValueError(f"Unsupported type for subject_image_pil: {type(subject_image_pil)}")
 
-        object_image_pil_low_res = pil_image_to_process.resize((384, 384))
-        object_image_pil_high_res_orig = pil_image_to_process.resize((768, 768))
+        
+        object_image_pil_low_res = pil_image_to_process.resize((378, 378), Image.Resampling.LANCZOS)
+        # High-resolution processing: Quadrants should also be 378x378 if processed independently.
+        # If the original intent was to get higher detail from a larger image,
+        # the base for quadrants (768x768) might also need adjustment or a different strategy.
+        # For now, let's assume each quadrant fed to the processor should be 378x378.
+        # This means we resize the original to 2*378 = 756x756, then take 378x378 crops.
+        object_image_pil_high_res_base = pil_image_to_process.resize((756, 756), Image.Resampling.LANCZOS)
         object_image_pil_high_res_crops = [
-            object_image_pil_high_res_orig.crop((0, 0, 384, 384)),
-            object_image_pil_high_res_orig.crop((384, 0, 768, 384)),
-            object_image_pil_high_res_orig.crop((0, 384, 384, 768)),
-            object_image_pil_high_res_orig.crop((384, 384, 768, 768)),
+            object_image_pil_high_res_base.crop((0, 0, 378, 378)),
+            object_image_pil_high_res_base.crop((378, 0, 756, 378)),
+            object_image_pil_high_res_base.crop((0, 378, 378, 756)),
+            object_image_pil_high_res_base.crop((378, 378, 756, 756)),
         ]
-        # nb_split_image = len(object_image_pil_high_res_crops) # Not strictly needed with current loop
 
         if self.siglip_processor is None:
             raise ValueError("SigLIP processor (self.siglip_processor) is not initialized.")
         if self.dinov2_processor is None:
             raise ValueError("DINOv2 processor (self.dinov2_processor) is not initialized.")
 
+        # Low-resolution processing (input image is already 378x378, processors are configured)
         siglip_low_res_pixels = self._hf_preprocess_pil(self.siglip_processor, object_image_pil_low_res)
         dinov2_low_res_pixels = self._hf_preprocess_pil(self.dinov2_processor, object_image_pil_low_res)
 
@@ -370,70 +395,129 @@ class InstantCharacterFluxPipeline(nn.Module): # Changed base class
             print(f"[encode_image_emb WARNING] Low-res DEEP feature sequence lengths mismatch after CLS strip and before fusion: "
                   f"SigLIP: {siglip_deep_low.shape[1]}, DINOv2: {dinov2_deep_low.shape[1]}. "
                   "This may require preprocessing adjustments or spatial interpolation if not intended. "
-                  "Proceeding with concatenation; ensure this is the desired behavior if lengths differ.")
-        
+                  "Targeting 729 for both after this change.")
+        else:
+            print(f"[encode_image_emb INFO] Low-res DEEP feature sequence lengths MATCH: SigLIP: {siglip_deep_low.shape[1]}, DINOv2: {dinov2_deep_low.shape[1]}.")
+
         # Assertion/Verification for low-res shallow features
-        # The sequence length of shallow features is sum_of_patches_from_selected_layers.
-        # This assertion checks if the *total concatenated shallow sequence length* matches.
         if siglip_shallow_low.shape[1] != dinov2_shallow_low.shape[1]:
             print(f"[encode_image_emb WARNING] Low-res SHALLOW feature sequence lengths mismatch after CLS strip and before fusion: "
                   f"SigLIP: {siglip_shallow_low.shape[1]}, DINOv2: {dinov2_shallow_low.shape[1]}. "
                    "This may require preprocessing adjustments or spatial interpolation if not intended. "
-                   "Proceeding with concatenation; ensure this is the desired behavior if lengths differ.")
+                   "Targeting 729 for both after this change.")
+        else:
+            print(f"[encode_image_emb INFO] Low-res SHALLOW feature sequence lengths MATCH: SigLIP: {siglip_shallow_low.shape[1]}, DINOv2: {dinov2_shallow_low.shape[1]}.")
 
+        # Adjust DINOv2 deep features if one token longer than SigLIP
+        if dinov2_deep_low.shape[1] == siglip_deep_low.shape[1] + 1:
+            print(f"[encode_image_emb INFO] Adjusting DINOv2 deep features from {dinov2_deep_low.shape[1]} to {siglip_deep_low.shape[1]} tokens by dropping the last token.")
+            dinov2_deep_low = dinov2_deep_low[:, :-1, :]
         image_embeds_low_res_deep = torch.cat([siglip_deep_low, dinov2_deep_low], dim=2)
+        # Adjust DINOv2 shallow features if one token longer than SigLIP
+        if dinov2_shallow_low.shape[1] == siglip_shallow_low.shape[1] + 1:
+            print(f"[encode_image_emb INFO] Adjusting DINOv2 shallow features from {dinov2_shallow_low.shape[1]} to {siglip_shallow_low.shape[1]} tokens by dropping the last token.")
+            dinov2_shallow_low = dinov2_shallow_low[:, :-1, :]
         image_embeds_low_res_shallow = torch.cat([siglip_shallow_low, dinov2_shallow_low], dim=2)
 
-        # High-resolution processing
+        # High-resolution processing (each crop is 378x378, processors are configured)
         all_siglip_high_res_deep_patches = []
         all_dinov2_high_res_deep_patches = []
+        all_siglip_high_res_shallow_patches = [] # New list for SigLIP shallow features
+        all_dinov2_high_res_shallow_patches = []  # New list for DINOv2 shallow features
 
-        for crop_pil in object_image_pil_high_res_crops:
-            siglip_patch_pixels = self._hf_preprocess_pil(self.siglip_hf_processor, crop_pil)
-            dinov2_patch_pixels = self._hf_preprocess_pil(self.dinov2_hf_processor, crop_pil)
+        for crop_pil in object_image_pil_high_res_crops: # Each crop_pil is 378x378
+            siglip_patch_pixels = self._hf_preprocess_pil(self.siglip_processor, crop_pil)
+            dinov2_patch_pixels = self._hf_preprocess_pil(self.dinov2_processor, crop_pil)
+            
+            siglip_deep_patch, siglip_shallow_patch = self.encode_siglip_image_emb(siglip_patch_pixels, device, dtype)
+            dinov2_deep_patch, dinov2_shallow_patch = self.encode_dinov2_image_emb(dinov2_patch_pixels, device, dtype)
 
-            siglip_deep_patch, _ = self.encode_siglip_image_emb(siglip_patch_pixels, device, dtype) # Ignore shallow
-            dinov2_deep_patch, _ = self.encode_dinov2_image_emb(dinov2_patch_pixels, device, dtype) # Ignore shallow
+            # Adjust DINOv2 deep features for the current quadrant if one token longer than SigLIP
+            if dinov2_deep_patch.shape[1] == siglip_deep_patch.shape[1] + 1:
+                print(f"[encode_image_emb INFO] Adjusting DINOv2 DEEP features for QUADRANT from {dinov2_deep_patch.shape[1]} to {siglip_deep_patch.shape[1]} tokens.")
+                dinov2_deep_patch = dinov2_deep_patch[:, :-1, :]
+
+            # Adjust DINOv2 shallow features for the current quadrant if one token longer than SigLIP
+            if dinov2_shallow_patch.shape[1] == siglip_shallow_patch.shape[1] + 1:
+                print(f"[encode_image_emb INFO] Adjusting DINOv2 SHALLOW features for QUADRANT from {dinov2_shallow_patch.shape[1]} to {siglip_shallow_patch.shape[1]} tokens.")
+                dinov2_shallow_patch = dinov2_shallow_patch[:, :-1, :]
             
             all_siglip_high_res_deep_patches.append(siglip_deep_patch)
             all_dinov2_high_res_deep_patches.append(dinov2_deep_patch)
+            all_siglip_high_res_shallow_patches.append(siglip_shallow_patch)
+            all_dinov2_high_res_shallow_patches.append(dinov2_shallow_patch)
 
-        if not all_siglip_high_res_deep_patches or not all_dinov2_high_res_deep_patches:
+        if not all_siglip_high_res_deep_patches or not all_dinov2_high_res_deep_patches or \
+           not all_siglip_high_res_shallow_patches or not all_dinov2_high_res_shallow_patches:
             # This case should ideally not be reached if object_image_pil_high_res_crops is not empty
             # and encoders work. Adding a fallback or clearer error.
-            print("[encode_image_emb WARNING] No high-resolution patch features were extracted. "
-                  "image_embeds_high_res_deep will be None or empty.")
+            print("[encode_image_emb WARNING] No high-resolution patch features were extracted for deep or shallow. "
+                  "Resulting high-res embeds will be None or empty.")
             # Depending on downstream requirements, this might need to be an error or a specific handling.
             # For now, if lists are empty, cat will fail. Let's ensure they are not before cat.
+            
+            # Handle DEEP features
             if not all_siglip_high_res_deep_patches and not all_dinov2_high_res_deep_patches:
-                 image_embeds_high_res_deep = torch.empty(0, device=device, dtype=dtype) # Or handle as error
-            elif not all_siglip_high_res_deep_patches: # Only DINOv2 has patches
-                 all_siglip_high_res_deep = torch.empty_like(all_dinov2_high_res_deep_patches[0]) # Match shape for cat
+                 image_embeds_high_res_deep = torch.empty(0, device=device, dtype=dtype)
+            elif not all_siglip_high_res_deep_patches: # Only DINOv2 has deep patches
+                 all_siglip_high_res_deep = torch.empty_like(all_dinov2_high_res_deep_patches[0])
                  all_dinov2_high_res_deep = torch.cat(all_dinov2_high_res_deep_patches, dim=1)
                  image_embeds_high_res_deep = torch.cat([all_siglip_high_res_deep, all_dinov2_high_res_deep], dim=2)
-            elif not all_dinov2_high_res_deep_patches: # Only SigLIP has patches
+            elif not all_dinov2_high_res_deep_patches: # Only SigLIP has deep patches
                  all_dinov2_high_res_deep = torch.empty_like(all_siglip_high_res_deep_patches[0])
                  all_siglip_high_res_deep = torch.cat(all_siglip_high_res_deep_patches, dim=1)
                  image_embeds_high_res_deep = torch.cat([all_siglip_high_res_deep, all_dinov2_high_res_deep], dim=2)
-            else: # Should not happen if one list is empty and the other not, based on prior logic.
-                 raise ValueError("Inconsistent state in high-res patch processing.")
+            else: # Both deep lists have patches (this path taken if shallow lists were empty)
+                 all_siglip_high_res_deep = torch.cat(all_siglip_high_res_deep_patches, dim=1)
+                 all_dinov2_high_res_deep = torch.cat(all_dinov2_high_res_deep_patches, dim=1)
+                 if all_siglip_high_res_deep.shape[1] != all_dinov2_high_res_deep.shape[1]:
+                     print(f"[encode_image_emb WARNING] High-res DEEP patch feature sequence lengths mismatch (fallback path): "
+                           f"SigLIP: {all_siglip_high_res_deep.shape[1]}, DINOv2: {all_dinov2_high_res_deep.shape[1]}.")
+                 image_embeds_high_res_deep = torch.cat([all_siglip_high_res_deep, all_dinov2_high_res_deep], dim=2)
 
-        else: # Both lists have patches
+            # Handle SHALLOW features
+            if not all_siglip_high_res_shallow_patches and not all_dinov2_high_res_shallow_patches:
+                 image_embeds_high_res_shallow = torch.empty(0, device=device, dtype=dtype)
+            elif not all_siglip_high_res_shallow_patches: # Only DINOv2 has shallow patches
+                 all_siglip_high_res_shallow = torch.empty_like(all_dinov2_high_res_shallow_patches[0])
+                 all_dinov2_high_res_shallow = torch.cat(all_dinov2_high_res_shallow_patches, dim=1)
+                 image_embeds_high_res_shallow = torch.cat([all_siglip_high_res_shallow, all_dinov2_high_res_shallow], dim=2)
+            elif not all_dinov2_high_res_shallow_patches: # Only SigLIP has shallow patches
+                 all_dinov2_high_res_shallow = torch.empty_like(all_siglip_high_res_shallow_patches[0])
+                 all_siglip_high_res_shallow = torch.cat(all_siglip_high_res_shallow_patches, dim=1)
+                 image_embeds_high_res_shallow = torch.cat([all_siglip_high_res_shallow, all_dinov2_high_res_shallow], dim=2)
+            else: # Both shallow lists have patches (this path taken if deep lists were empty)
+                 all_siglip_high_res_shallow = torch.cat(all_siglip_high_res_shallow_patches, dim=1)
+                 all_dinov2_high_res_shallow = torch.cat(all_dinov2_high_res_shallow_patches, dim=1)
+                 if all_siglip_high_res_shallow.shape[1] != all_dinov2_high_res_shallow.shape[1]:
+                     print(f"[encode_image_emb WARNING] High-res SHALLOW patch feature sequence lengths mismatch (fallback path): "
+                           f"SigLIP: {all_siglip_high_res_shallow.shape[1]}, DINOv2: {all_dinov2_high_res_shallow.shape[1]}.")
+                 image_embeds_high_res_shallow = torch.cat([all_siglip_high_res_shallow, all_dinov2_high_res_shallow], dim=2)
+
+        else: # All lists have patches (deep and shallow)
             all_siglip_high_res_deep = torch.cat(all_siglip_high_res_deep_patches, dim=1)
             all_dinov2_high_res_deep = torch.cat(all_dinov2_high_res_deep_patches, dim=1)
+            all_siglip_high_res_shallow = torch.cat(all_siglip_high_res_shallow_patches, dim=1)
+            all_dinov2_high_res_shallow = torch.cat(all_dinov2_high_res_shallow_patches, dim=1)
         
             if all_siglip_high_res_deep.shape[1] != all_dinov2_high_res_deep.shape[1]:
                 print(f"[encode_image_emb WARNING] High-res DEEP patch feature sequence lengths mismatch after concatenation: "
                       f"SigLIP: {all_siglip_high_res_deep.shape[1]}, DINOv2: {all_dinov2_high_res_deep.shape[1]}. "
                       "Proceeding with concatenation; ensure this is the desired behavior if lengths differ.")
-
             image_embeds_high_res_deep = torch.cat([all_siglip_high_res_deep, all_dinov2_high_res_deep], dim=2)
+
+            if all_siglip_high_res_shallow.shape[1] != all_dinov2_high_res_shallow.shape[1]:
+                print(f"[encode_image_emb WARNING] High-res SHALLOW patch feature sequence lengths mismatch after concatenation: "
+                      f"SigLIP: {all_siglip_high_res_shallow.shape[1]}, DINOv2: {all_dinov2_high_res_shallow.shape[1]}. "
+                      "Proceeding with concatenation; ensure this is the desired behavior if lengths differ.")
+            image_embeds_high_res_shallow = torch.cat([all_siglip_high_res_shallow, all_dinov2_high_res_shallow], dim=2)
 
 
         image_embeds_dict = dict(
             image_embeds_low_res_shallow=image_embeds_low_res_shallow.to(device=device, dtype=dtype),
             image_embeds_low_res_deep=image_embeds_low_res_deep.to(device=device, dtype=dtype),
             image_embeds_high_res_deep=image_embeds_high_res_deep.to(device=device, dtype=dtype),
+            image_embeds_high_res_shallow=image_embeds_high_res_shallow.to(device=device, dtype=dtype), # Added
         )
         return image_embeds_dict
 
