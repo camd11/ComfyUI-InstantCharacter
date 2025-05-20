@@ -167,8 +167,16 @@ class InstantCharacterFluxPipeline(FluxPipeline):
 
         # image encoder
         print(f"=> loading image_encoder_1: {image_encoder_path}")
-        image_encoder = SiglipVisionModel.from_pretrained(image_encoder_path, cache_dir=cache_dir)
-        image_processor = SiglipImageProcessor.from_pretrained(image_encoder_path, cache_dir=cache_dir)
+        image_encoder = SiglipVisionModel.from_pretrained(
+            image_encoder_path,
+            cache_dir=cache_dir,
+            local_files_only=True
+        )
+        image_processor = SiglipImageProcessor.from_pretrained(
+            image_encoder_path,
+            cache_dir=cache_dir,
+            local_files_only=True
+        )
         image_encoder.eval()
         image_encoder.to(device, dtype=dtype)
         self.siglip_image_encoder = image_encoder
@@ -176,8 +184,12 @@ class InstantCharacterFluxPipeline(FluxPipeline):
 
         # image encoder 2
         print(f"=> loading image_encoder_2: {image_encoder_2_path}")
-        image_encoder_2 = AutoModel.from_pretrained(image_encoder_2_path, cache_dir=cache_dir_2)
-        image_processor_2 = AutoImageProcessor.from_pretrained(image_encoder_2_path, cache_dir=cache_dir_2)
+        image_encoder_2 = AutoModel.from_pretrained(
+            image_encoder_2_path, cache_dir=cache_dir_2, local_files_only=True
+        )
+        image_processor_2 = AutoImageProcessor.from_pretrained(
+            image_encoder_2_path, cache_dir=cache_dir_2, local_files_only=True
+        )
         image_encoder_2.eval()
         image_encoder_2.to(device, dtype=dtype)
         image_processor_2.crop_size = dict(height=384, width=384)

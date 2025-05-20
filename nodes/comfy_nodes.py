@@ -25,31 +25,69 @@ class InstantCharacterLoadModelFromLocal:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                # 模型路径输入替换为 STRING 类型，用户可手动输入路径
-                "base_model_path": ("STRING", {"default": "models/FLUX.1-dev", "tooltip": ""}),
-                "image_encoder_path": ("STRING", {"default": "models/google/siglip-so400m-patch14-384", "tooltip": ""}),
-                "image_encoder_2_path": ("STRING", {"default": "models/facebook/dinov2-giant", "tooltip": ""}),
-                "ip_adapter_path": ("STRING", {"default": "models/InstantCharacter/instantcharacter_ip-adapter.bin", "tooltip": ""}),
-                "cpu_offload": ("BOOLEAN", {"default": False, "tooltip": "是否启用CPU卸载以节省显存"}),
+                "model_path": ("STRING", {"default": "path/to/your/local/flux_model_directory_or_file", "tooltip": "Path to the local FLUX.1-dev model directory or .safetensors file"}),
+                "image_encoder_path": ("STRING", {"default": "siglip-so400m-patch14-384", "tooltip": "Name of the CLIP Vision model folder (e.g., siglip-so400m-patch14-384) within ComfyUI/models/clip_vision/"}),
+                "image_encoder_2_path": ("STRING", {"default": "dinov2-giant", "tooltip": "Name of the DINOv2 model folder (e.g., dinov2-giant) within ComfyUI/models/clip_vision/"}),
+                "ip_adapter_path": ("STRING", {"default": "instantcharacter_ip-adapter.bin", "tooltip": "Filename of the IP-Adapter model (e.g., instantcharacter_ip-adapter.bin) within ComfyUI/models/ipadapter/"}),
+                "cpu_offload": ("BOOLEAN", {"default": False, "tooltip": "Enable CPU offload to save VRAM"}),
             }
         }
 
     RETURN_TYPES = ("INSTANTCHAR_PIPE",)
     FUNCTION = "load_model"
     CATEGORY = "InstantCharacter"
-    DESCRIPTION = "加载InstantCharacter模型并支持自定义模型路径"
+    DESCRIPTION = "Loads InstantCharacter models and components from local file paths, disabling HuggingFace downloads."
     
-    def load_model(self, base_model_path, image_encoder_path, image_encoder_2_path, ip_adapter_path, cpu_offload):
+    def load_model(self, model_path, image_encoder_path, image_encoder_2_path, ip_adapter_path, cpu_offload):
+        if not model_path or not model_path.strip():
+            raise RuntimeError("InstantCharacter: Local model path (model_path) is required. Please specify the path to your FLUX.1-dev (or compatible) model files.")
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
         
-        pipe = InstantCharacterFluxPipeline.from_pretrained(base_model_path, torch_dtype=torch.bfloat16)
+        # Resolve paths for encoders and IP adapter
+        try:
+            # These names come from the input parameters, which have defaults matching the required names
+            image_encoder_path_resolved = folder_paths.get_full_path("clip_vision", image_encoder_path)
+            image_encoder_2_path_resolved = folder_paths.get_full_path("clip_vision", image_encoder_2_path)
+            ip_adapter_path_resolved = folder_paths.get_full_path("ipadapter", ip_adapter_path)
+        except Exception as e:
+            # Handle cases where folder_paths might not find a base path for the type
+            raise RuntimeError(f"Could not resolve model paths using folder_paths: {e}. Ensure ComfyUI's model paths are configured correctly.")
+
+        # Check paths and raise specific errors
+        if not image_encoder_path_resolved or not os.path.exists(image_encoder_path_resolved):
+            raise FileNotFoundError(
+                f"Image Encoder 1 ({image_encoder_path}) not found. "
+                f"Expected at path: '{image_encoder_path_resolved}'. "
+                f"Please ensure the model is in ComfyUI/models/clip_vision/{image_encoder_path}/"
+            )
+
+        if not image_encoder_2_path_resolved or not os.path.exists(image_encoder_2_path_resolved):
+            raise FileNotFoundError(
+                f"Image Encoder 2 ({image_encoder_2_path}) not found. "
+                f"Expected at path: '{image_encoder_2_path_resolved}'. "
+                f"Please ensure the model is in ComfyUI/models/clip_vision/{image_encoder_2_path}/"
+            )
+
+        if not ip_adapter_path_resolved or not os.path.exists(ip_adapter_path_resolved):
+            raise FileNotFoundError(
+                f"IP-Adapter ({ip_adapter_path}) not found. "
+                f"Expected at path: '{ip_adapter_path_resolved}'. "
+                f"Please ensure the model is in ComfyUI/models/ipadapter/{ip_adapter_path}"
+            )
+        
+        pipe = InstantCharacterFluxPipeline.from_pretrained(
+            model_path,
+            torch_dtype=torch.bfloat16,
+            local_files_only=True # Ensure no download attempts for the base model
+        )
 
         # Initialize adapter first
         pipe.init_adapter(
-            image_encoder_path=image_encoder_path,
-            image_encoder_2_path=image_encoder_2_path,
-            subject_ipadapter_cfg=dict(subject_ip_adapter_path=ip_adapter_path, nb_token=1024),
+            image_encoder_path=resolved_image_encoder_path,
+            image_encoder_2_path=resolved_image_encoder_2_path,
+            subject_ipadapter_cfg=dict(subject_ip_adapter_path=resolved_ip_adapter_path, nb_token=1024),
+            # The pipeline.py init_adapter will need to use local_files_only=True for these encoders
         )
 
         # Then move to device or enable offloading
@@ -134,6 +172,8 @@ class InstantCharacterGenerate:
             },
             "optional": {
                 "subject_image": ("IMAGE",),
+                "lora_path": ("STRING", {"default": "", "tooltip": "Path to the LoRA (.safetensors) file"}),
+                "lora_trigger": ("STRING", {"default": "", "tooltip": "Trigger keyword(s) for the LoRA"}),
             }
         }
     
@@ -141,8 +181,8 @@ class InstantCharacterGenerate:
     FUNCTION = "generate"
     CATEGORY = "InstantCharacter"
 
-    def generate(self, pipe, prompt, height, width, guidance_scale, 
-                num_inference_steps, seed, subject_scale, subject_image=None):
+    def generate(self, pipe, prompt, height, width, guidance_scale,
+                num_inference_steps, seed, subject_scale, subject_image=None, lora_path=None, lora_trigger=None):
         
         # Convert subject image from tensor to PIL if provided
         subject_image_pil = None
@@ -156,17 +196,34 @@ class InstantCharacterGenerate:
             elif isinstance(subject_image, np.ndarray):
                 subject_image_pil = Image.fromarray((subject_image * 255).astype(np.uint8))
         
+        lora_path_input = lora_path.strip() if lora_path else ""
+        lora_trigger_input = lora_trigger.strip() if lora_trigger else ""
+
         # Generate image
-        output = pipe(
-            prompt=prompt,
-            height=height,
-            width=width,
-            guidance_scale=guidance_scale,
-            num_inference_steps=num_inference_steps,
-            generator=torch.Generator("cpu").manual_seed(seed),
-            subject_image=subject_image_pil,
-            subject_scale=subject_scale,
-        )
+        if lora_path_input:
+            output = pipe.with_style_lora(
+                lora_file_path=lora_path_input,
+                trigger=lora_trigger_input,
+                prompt=prompt,
+                height=height,
+                width=width,
+                guidance_scale=guidance_scale,
+                num_inference_steps=num_inference_steps,
+                generator=torch.Generator("cpu").manual_seed(seed),
+                subject_image=subject_image_pil,
+                subject_scale=subject_scale,
+            )
+        else:
+            output = pipe(
+                prompt=prompt,
+                height=height,
+                width=width,
+                guidance_scale=guidance_scale,
+                num_inference_steps=num_inference_steps,
+                generator=torch.Generator("cpu").manual_seed(seed),
+                subject_image=subject_image_pil,
+                subject_scale=subject_scale,
+            )
         
         # Convert PIL image to tensor format
         image = np.array(output.images[0]) / 255.0
