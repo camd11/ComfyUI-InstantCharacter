@@ -44,36 +44,44 @@ class InstantCharacterLoadModelFromLocal:
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
         
-        # Resolve paths for encoders and IP adapter
-        try:
-            # These names come from the input parameters, which have defaults matching the required names
-            image_encoder_path_resolved = folder_paths.get_full_path("clip_vision", image_encoder_path)
-            image_encoder_2_path_resolved = folder_paths.get_full_path("clip_vision", image_encoder_2_path)
-            ip_adapter_path_resolved = folder_paths.get_full_path("ipadapter", ip_adapter_path)
-        except Exception as e:
-            # Handle cases where folder_paths might not find a base path for the type
-            raise RuntimeError(f"Could not resolve model paths using folder_paths: {e}. Ensure ComfyUI's model paths are configured correctly.")
+        # --- TEMPORARY DIAGNOSTIC WORKAROUND ---
+        # The following paths are constructed manually because folder_paths.get_full_path()
+        # was returning None in the user's environment. This is not a permanent solution.
+        # The user should investigate their ComfyUI model path configuration (e.g., extra_model_paths.yaml)
+        # to ensure 'clip_vision' and 'ipadapter' types are correctly recognized.
+        # This workaround assumes a standard ComfyUI directory structure.
+        assumed_comfyui_models_base_path = "/home/ryan/ComfyUI2025/ComfyUI/models/"
+
+        # These names come from the input parameters, which have defaults matching the required names
+        # For the diagnostic, we use the default names directly.
+        image_encoder_name_1 = "siglip-so400m-patch14-384" # Default from INPUT_TYPES
+        image_encoder_name_2 = "dinov2-giant" # Default from INPUT_TYPES
+        ip_adapter_filename = "instantcharacter_ip-adapter.bin" # Default from INPUT_TYPES
+
+        image_encoder_path_resolved = os.path.join(assumed_comfyui_models_base_path, "clip_vision", image_encoder_name_1)
+        image_encoder_2_path_resolved = os.path.join(assumed_comfyui_models_base_path, "clip_vision", image_encoder_name_2)
+        ip_adapter_path_resolved = os.path.join(assumed_comfyui_models_base_path, "ipadapter", ip_adapter_filename)
 
         # Check paths and raise specific errors
-        if not image_encoder_path_resolved or not os.path.exists(image_encoder_path_resolved):
+        if not os.path.exists(image_encoder_path_resolved):
             raise FileNotFoundError(
-                f"Image Encoder 1 ({image_encoder_path}) not found. "
-                f"Expected at path: '{image_encoder_path_resolved}'. "
-                f"Please ensure the model is in ComfyUI/models/clip_vision/{image_encoder_path}/"
+                f"DIAGNOSTIC: Image Encoder 1 ({image_encoder_name_1}) not found at manually constructed path: '{image_encoder_path_resolved}'. "
+                f"This path was built assuming ComfyUI models are at '{assumed_comfyui_models_base_path}'. "
+                f"Please verify the path and file existence. If this diagnostic works, the underlying issue is likely with ComfyUI's folder_paths configuration."
             )
 
-        if not image_encoder_2_path_resolved or not os.path.exists(image_encoder_2_path_resolved):
+        if not os.path.exists(image_encoder_2_path_resolved):
             raise FileNotFoundError(
-                f"Image Encoder 2 ({image_encoder_2_path}) not found. "
-                f"Expected at path: '{image_encoder_2_path_resolved}'. "
-                f"Please ensure the model is in ComfyUI/models/clip_vision/{image_encoder_2_path}/"
+                f"DIAGNOSTIC: Image Encoder 2 ({image_encoder_name_2}) not found at manually constructed path: '{image_encoder_2_path_resolved}'. "
+                f"This path was built assuming ComfyUI models are at '{assumed_comfyui_models_base_path}'. "
+                f"Please verify the path and file existence. If this diagnostic works, the underlying issue is likely with ComfyUI's folder_paths configuration."
             )
 
-        if not ip_adapter_path_resolved or not os.path.exists(ip_adapter_path_resolved):
+        if not os.path.exists(ip_adapter_path_resolved):
             raise FileNotFoundError(
-                f"IP-Adapter ({ip_adapter_path}) not found. "
-                f"Expected at path: '{ip_adapter_path_resolved}'. "
-                f"Please ensure the model is in ComfyUI/models/ipadapter/{ip_adapter_path}"
+                f"DIAGNOSTIC: IP-Adapter ({ip_adapter_filename}) not found at manually constructed path: '{ip_adapter_path_resolved}'. "
+                f"This path was built assuming ComfyUI models are at '{assumed_comfyui_models_base_path}'. "
+                f"Please verify the path and file existence. If this diagnostic works, the underlying issue is likely with ComfyUI's folder_paths configuration."
             )
         
         pipe = InstantCharacterFluxPipeline.from_pretrained(
@@ -84,9 +92,9 @@ class InstantCharacterLoadModelFromLocal:
 
         # Initialize adapter first
         pipe.init_adapter(
-            image_encoder_path=resolved_image_encoder_path,
-            image_encoder_2_path=resolved_image_encoder_2_path,
-            subject_ipadapter_cfg=dict(subject_ip_adapter_path=resolved_ip_adapter_path, nb_token=1024),
+            image_encoder_path=image_encoder_path_resolved, # Use resolved path
+            image_encoder_2_path=image_encoder_2_path_resolved, # Use resolved path
+            subject_ipadapter_cfg=dict(subject_ip_adapter_path=ip_adapter_path_resolved, nb_token=1024), # Use resolved path
             # The pipeline.py init_adapter will need to use local_files_only=True for these encoders
         )
 
