@@ -42,15 +42,31 @@ class InstantCharacterLoadModelFromLocal:
     def load_model(self, base_model_path, image_encoder_path, image_encoder_2_path, ip_adapter_path, cpu_offload):
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        
-        pipe = InstantCharacterFluxPipeline.from_pretrained(base_model_path, torch_dtype=torch.bfloat16)
+
+        if not os.path.exists(base_model_path):
+            raise FileNotFoundError(f"Base model path not found: {base_model_path}")
+        if not os.path.exists(image_encoder_path):
+            raise FileNotFoundError(f"Image encoder path not found: {image_encoder_path}")
+        if not os.path.exists(image_encoder_2_path):
+            raise FileNotFoundError(f"Image encoder 2 path not found: {image_encoder_2_path}")
+        if not os.path.exists(ip_adapter_path):
+            raise FileNotFoundError(f"IP adapter path not found: {ip_adapter_path}")
+            
+        try:
+            pipe = InstantCharacterFluxPipeline.from_pretrained(base_model_path, torch_dtype=torch.bfloat16, local_files_only=True)
+        except Exception as e:
+            raise RuntimeError(f"Failed to load base model from {base_model_path}: {e}")
 
         # Initialize adapter first
-        pipe.init_adapter(
-            image_encoder_path=image_encoder_path,
-            image_encoder_2_path=image_encoder_2_path,
-            subject_ipadapter_cfg=dict(subject_ip_adapter_path=ip_adapter_path, nb_token=1024),
-        )
+        try:
+            pipe.init_adapter(
+                image_encoder_path=image_encoder_path,
+                image_encoder_2_path=image_encoder_2_path,
+                subject_ipadapter_cfg=dict(subject_ip_adapter_path=ip_adapter_path, nb_token=1024),
+                local_files_only=True # Assuming init_adapter also supports this or handles local paths directly
+            )
+        except Exception as e:
+            raise RuntimeError(f"Failed to initialize adapter with local paths: {e}")
 
         # Then move to device or enable offloading
         if cpu_offload:
@@ -134,6 +150,8 @@ class InstantCharacterGenerate:
             },
             "optional": {
                 "subject_image": ("IMAGE",),
+                "lora_path": ("STRING", {"default": "", "tooltip": "Path to LoRA file (optional)"}),
+                "lora_trigger": ("STRING", {"default": "", "tooltip": "LoRA trigger phrase (optional)"}),
             }
         }
     
@@ -141,8 +159,9 @@ class InstantCharacterGenerate:
     FUNCTION = "generate"
     CATEGORY = "InstantCharacter"
 
-    def generate(self, pipe, prompt, height, width, guidance_scale, 
-                num_inference_steps, seed, subject_scale, subject_image=None):
+    def generate(self, pipe, prompt, height, width, guidance_scale,
+                num_inference_steps, seed, subject_scale, subject_image=None,
+                lora_path=None, lora_trigger=""):
         
         # Convert subject image from tensor to PIL if provided
         subject_image_pil = None
@@ -157,16 +176,38 @@ class InstantCharacterGenerate:
                 subject_image_pil = Image.fromarray((subject_image * 255).astype(np.uint8))
         
         # Generate image
-        output = pipe(
-            prompt=prompt,
-            height=height,
-            width=width,
-            guidance_scale=guidance_scale,
-            num_inference_steps=num_inference_steps,
-            generator=torch.Generator("cpu").manual_seed(seed),
-            subject_image=subject_image_pil,
-            subject_scale=subject_scale,
-        )
+        if lora_path and os.path.exists(lora_path):
+            print(f"Applying LoRA from: {lora_path} with trigger: '{lora_trigger}'")
+            try:
+                output = pipe.with_style_lora(
+                    prompt=prompt,
+                    height=height,
+                    width=width,
+                    guidance_scale=guidance_scale,
+                    num_inference_steps=num_inference_steps,
+                    generator=torch.Generator("cpu").manual_seed(seed),
+                    subject_image=subject_image_pil,
+                    subject_scale=subject_scale,
+                    lora_file_path=lora_path,
+                    trigger=lora_trigger
+                )
+            except AttributeError:
+                 raise AttributeError("The 'with_style_lora' method is not available in the current pipeline. Please ensure your InstantCharacterFluxPipeline is up to date and supports LoRA.")
+            except Exception as e:
+                raise RuntimeError(f"Error applying LoRA: {e}")
+        elif lora_path and not os.path.exists(lora_path):
+            raise FileNotFoundError(f"LoRA path not found: {lora_path}")
+        else:
+            output = pipe(
+                prompt=prompt,
+                height=height,
+                width=width,
+                guidance_scale=guidance_scale,
+                num_inference_steps=num_inference_steps,
+                generator=torch.Generator("cpu").manual_seed(seed),
+                subject_image=subject_image_pil,
+                subject_scale=subject_scale,
+            )
         
         # Convert PIL image to tensor format
         image = np.array(output.images[0]) / 255.0

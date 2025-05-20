@@ -4,6 +4,7 @@
 from PIL import Image
 from einops import rearrange
 import torch
+from typing import Union, List, Optional, Dict, Callable, Any # Added typing imports
 from diffusers.pipelines.flux.pipeline_flux import *
 from transformers import SiglipVisionModel, SiglipImageProcessor, AutoModel, AutoImageProcessor
 
@@ -161,23 +162,24 @@ class InstantCharacterFluxPipeline(FluxPipeline):
         cache_dir=None,
         image_encoder_2_path=None,
         cache_dir_2=None,
-        subject_ipadapter_cfg=None, 
+        subject_ipadapter_cfg=None,
+        local_files_only: bool = False,
     ):
         device, dtype = self.transformer.device, self.transformer.dtype
 
         # image encoder
-        print(f"=> loading image_encoder_1: {image_encoder_path}")
-        image_encoder = SiglipVisionModel.from_pretrained(image_encoder_path, cache_dir=cache_dir)
-        image_processor = SiglipImageProcessor.from_pretrained(image_encoder_path, cache_dir=cache_dir)
+        print(f"=> loading image_encoder_1: {image_encoder_path} with local_files_only={local_files_only}")
+        image_encoder = SiglipVisionModel.from_pretrained(image_encoder_path, cache_dir=cache_dir, local_files_only=local_files_only)
+        image_processor = SiglipImageProcessor.from_pretrained(image_encoder_path, cache_dir=cache_dir, local_files_only=local_files_only)
         image_encoder.eval()
         image_encoder.to(device, dtype=dtype)
         self.siglip_image_encoder = image_encoder
         self.siglip_image_processor = image_processor
 
         # image encoder 2
-        print(f"=> loading image_encoder_2: {image_encoder_2_path}")
-        image_encoder_2 = AutoModel.from_pretrained(image_encoder_2_path, cache_dir=cache_dir_2)
-        image_processor_2 = AutoImageProcessor.from_pretrained(image_encoder_2_path, cache_dir=cache_dir_2)
+        print(f"=> loading image_encoder_2: {image_encoder_2_path} with local_files_only={local_files_only}")
+        image_encoder_2 = AutoModel.from_pretrained(image_encoder_2_path, cache_dir=cache_dir_2, local_files_only=local_files_only)
+        image_processor_2 = AutoImageProcessor.from_pretrained(image_encoder_2_path, cache_dir=cache_dir_2, local_files_only=local_files_only)
         image_encoder_2.eval()
         image_encoder_2.to(device, dtype=dtype)
         image_processor_2.crop_size = dict(height=384, width=384)
